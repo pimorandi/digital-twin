@@ -1,0 +1,13 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile-ui
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    # No `environment:` entry for VITE_API_URL here on purpose: it's baked into
+    # the static JS bundle at build time (see docker/Dockerfile-ui), so setting
+    # it as a runtime container env var would silently do nothing.
+    restart: unless-stopped

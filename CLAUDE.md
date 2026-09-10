@@ -7,59 +7,79 @@ questions about a candidate's professional experience. The candidate's history i
 stored in a markdown file and exposed to the agent llmwiki-style (the agent reads
 and reasons over the markdown rather than a vector store).
 
-## Architecture
+## Architecture (essentials)
 
-Three containers orchestrated by Docker Compose:
+Single Cloud Run service, deployed stateless. Load-bearing facts that constrain
+work across the repo:
 
-- **frontend** — Vite + React + TypeScript, styled with Tailwind CSS. Chat UI,
-  consumes the backend over SSE for token streaming.
-- **backend** — FastAPI (Python 3.12) served by uvicorn. Hosts the agent, calls
-  the LLM on GCP, streams responses to the frontend via SSE.
-- **redis** — holds the state of the *ongoing* chat only (conversation history for
-  a single session).
+- **One public entry point: nginx.** nginx serves the static React build and
+  reverse-proxies `/api` to the backend. Nothing else is internet-facing.
+- **Backend and redis are never exposed** — they are reachable only from nginx
+  over the internal network.
+- **Frontend calls relative `/api`** — never a Compose service hostname
+  (`http://backend:8000` is unreachable from the browser).
+- **Stateless per instance.** Every instance starts with no memory of any past
+  chat; nothing may assume state survives across instances or restarts.
 
-## Statelessness
+Full request flow, the single-entry-point rationale, and history-file loading:
+**read `docs/architecture.md` before changing anything about routing, the
+nginx/backend boundary, session state, or how the professional history is loaded.**
 
-Deployed to GCP Cloud Run. Every instance starts with no memory of any past chat.
-Session state is per-instance and ephemeral by design:
+## Components
 
-- Redis state is in-memory, per-instance — NOT a shared/managed instance.
-- Sessions carry a TTL and expire after inactivity, so abandoned chats don't
-  accumulate and exhaust instance memory. (Recruiters typically close the tab
-  mid-chat, so expiry is important, not optional.)
-- Do not add logic that assumes state survives across instances or restarts.
+Orchestrated by Docker Compose:
 
-## LLM / agent
-
-- LLM runs on GCP.
-- Responses stream to the client via SSE.
-- The candidate's professional history lives in a markdown file (see guardrails).
-  The agent reads this as its knowledge source — no vector store / embeddings.
+- **frontend** — Vite + React + TypeScript, Tailwind CSS. Chat UI, consumes the
+  backend over SSE for token streaming. Served as a static build by nginx.
+- **nginx** — public entry point; serves the frontend and proxies `/api`.
+- **backend** — FastAPI (Python 3.12) on uvicorn. Hosts the agent, calls the LLM
+  on GCP, streams responses via SSE.
+- **redis** — holds the state of the *ongoing* chat only (single session),
+  in-memory and per-instance, with a TTL so abandoned sessions expire.
 
 ## Repository layout
 
 Frontend, backend, and shared config all live at the top level of the repo:
 
-  - /frontend Vite + React + TS app
-  - /backend FastAPI app
-  - <shared config> docker-compose.yml, .env, etc. at repo root
-
+    /frontend        Vite + React + TS app
+    /backend         FastAPI app
+    /docker          Dockerfiles + nginx.conf
+    /docs            architecture.md
+    <shared config>  compose.prod.yaml, compose.test.yaml, .env, etc. at repo root
 
 ## Local development
 
-- `docker compose up` starts and orchestrates all three containers locally.
-- Configuration is supplied via a `.env` file at the repo root. Keep a `.env.example` documenting every required variable (without values).
+- `docker compose -f compose.prod.yaml up` starts and orchestrates all containers locally.
+- Configuration is supplied via a `.env` file at the repo root. Keep a
+  `.env.example` documenting every required variable (without values).
 
 ## Testing & quality
 
-- **Backend tests:** pytest.
-- **Frontend tests:** Vitest + React Testing Library.
-- **Linting:** ruff (backend). ESLint + Prettier (frontend).
+### Backend
 
-Before considering any task done, always:
-1. Run the linters.
-2. Run the tests.
-Both must pass.
+Two sets of tests, both pytest:
+
+- **Unit tests** — quick, isolated checks of object initialization and standalone
+  methods/functions. Use mocks to emulate other resources (Redis, LLM, GCS). No
+  external services required.
+- **Smoke tests** — exercise the actual classes against a real environment, set up
+  via `compose.test.yaml`. Heavier; require the test containers to be running.
+
+Linting is ruff.
+
+### Frontend
+
+Vitest + React Testing Library are available but not required. Frontend tests are
+optional and encouraged only for genuinely stateful logic (e.g. SSE token
+accumulation, dropped-connection handling) — not routine component rendering.
+Linting is ESLint + Prettier.
+
+### Quality gate
+
+Before considering any task done:
+1. Run ruff and pytest — unit tests at minimum; smoke tests when the change
+   touches integration behavior. Both must pass.
+2. Frontend tests run if present, but are not a blocking gate.
 
 ## Conventions
 
@@ -68,8 +88,10 @@ Both must pass.
 ## Guardrails — never do these
 
 - **Never commit `.env`** or any secret it contains.
-- **Never commit the markdown file containing the candidate's professional
-  history.** (Add both to `.gitignore`.)
-- Never break the stateless assumption (see Statelessness).
-- Never hardcode the candidate's data into source — it comes from the markdown
-  file / config only.
+- **Never commit the professional-history markdown file** (gitignored; loaded at
+  runtime from a private GCS bucket). **Never make that bucket public.**
+- **Never expose the backend or redis to the internet** — nginx is the only public
+  entry point.
+- **Never break the stateless assumption** (see Architecture essentials).
+- **Never hardcode the candidate's data into source** — it comes from the GCS-loaded
+  markdown / config only.

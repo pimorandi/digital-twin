@@ -18,6 +18,17 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile-backend
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-3600}
     # No `ports:` entry on purpose: backend is reachable only from nginx over
     # the internal Compose network, never directly from the host/internet.
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # No `ports:` entry on purpose: redis is reachable only from the backend
+    # over the internal Compose network, never directly from the host/internet.
     restart: unless-stopped

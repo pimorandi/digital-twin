@@ -89,3 +89,92 @@ case (application layer); then revisit whether to restructure `backend/app`
 into explicit entities/infrastructure/persistence/application/presentation
 packages per `CLAUDE.md`. `compose.test.yaml` and smoke-test infra still
 don't exist.
+
+---
+
+## 2026-09-11 — Redis-backed session storage
+
+**Summary**: Made `POST /api/chat/stream` track, per `session_id`, how many
+messages that session has sent, backed by Redis, streaming the count back as
+the "answer" in place of the old fixed placeholder string — the first bit of
+real (non-canned) backend behavior. This also revisited and overturned the
+previous entry's call to leave `api/`/`schemas/` flat: `backend/app` is now
+properly restructured into the entities/infrastructure/persistence/
+application/presentation layering described in `CLAUDE.md`, with `api/` and
+`schemas/` moved (via `git mv`, preserving history) under a new
+`presentation/` package. Deliberate architecture call: `application` depends
+directly on the concrete `persistence.RedisSessionStore` class rather than
+through a Protocol/interface — CLAUDE.md's dependency rules only restrict
+inbound imports to `entities` and `infrastructure`, they don't mandate
+ports-and-adapters between `application` and `persistence` for a single
+Redis implementation, so no speculative abstraction was added. Verified
+end-to-end for real against the full `docker compose -f compose.prod.yaml up
+--build` stack (frontend + backend + redis), curling through nginx: the same
+`session_id` incremented 1 → 2 across two requests, and a different
+`session_id` started fresh at 1, with no backend errors; stack was then torn
+down. The `python-test-writer` subagent then fixed the tests broken by the
+`presentation/` move and added new persistence tests; final result 11 tests
+passed, `ruff check backend tests` clean.
+
+**Files changed**:
+- `backend/app/entities/config.py` — new; frozen `Settings` dataclass +
+  `load_settings()` reading `REDIS_URL` (default `redis://redis:6379/0`) and
+  `SESSION_TTL_SECONDS` (default `3600`) from env — config helpers live in
+  `entities` per `CLAUDE.md`
+- `backend/app/persistence/session_store.py` — new; `RedisSessionStore`
+  wraps `redis.asyncio.Redis`; `increment_message_count(session_id)` `INCR`s
+  key `session:<id>:message_count` and refreshes its TTL each call (sliding
+  TTL — an active session never expires mid-conversation, only after a full
+  TTL of inactivity)
+- `backend/app/application/chat_use_case.py` — new; `ChatUseCase
+  .handle_message(session_id, message)` delegates to the session store;
+  `message` currently unused, kept for when real LLM logic lands
+- `backend/app/api/` → `backend/app/presentation/api/`,
+  `backend/app/schemas/` → `backend/app/presentation/schemas/` — moved via
+  `git mv`
+- `backend/app/presentation/api/chat.py` — now streams a single
+  `data: <count>\n\n` frame + `data: [DONE]\n\n` (dropped the old word-by-
+  word streaming of a fixed string); added `get_chat_use_case(request) ->
+  ChatUseCase` reading `request.app.state.chat_use_case`, injected via
+  FastAPI `Depends`
+- `backend/app/main.py` — added an `asynccontextmanager` `lifespan` that
+  builds a lazy `redis.asyncio.Redis` client from `load_settings()`, wraps it
+  in `RedisSessionStore`, stores a `ChatUseCase` on `app.state.chat_use_case`
+  at startup, and closes the client at shutdown; deliberately no eager Redis
+  ping/health-check or retry logic — Redis-down resilience is out of scope
+  and deferred, a first request just surfaces a 500 if Redis is unreachable
+- `compose.prod.yaml` — added a `redis` service (`redis:7-alpine`, no
+  published port, per the guardrail against exposing redis to the internet);
+  `backend` now has `depends_on: [redis]` and `REDIS_URL`/
+  `SESSION_TTL_SECONDS` env vars with `${VAR:-default}` fallbacks
+- `docker/Dockerfile-backend`, `pyproject.toml` — added `redis>=5.0,<6` to
+  backend deps
+- `pyproject.toml` — added `[tool.ruff.lint.flake8-bugbear]
+  extend-immutable-calls = ["fastapi.Depends"]` to fix a `B008` false
+  positive on `Depends(get_chat_use_case)` as a function-argument default,
+  rather than suppressing with inline `# noqa`
+- `.env`, `.env.example` — added `REDIS_URL=redis://redis:6379/0` and
+  `SESSION_TTL_SECONDS=3600`
+- `tests/api/test_chat.py` — updated import paths for the `presentation/`
+  move; replaced fixed-string assertions with assertions on the new
+  single-count SSE frame; added an autouse fixture clearing
+  `app.dependency_overrides` after each test; overrides `get_chat_use_case`
+  with an `AsyncMock(spec=ChatUseCase)` so unit tests never touch real Redis
+- `tests/persistence/test_session_store.py` — new; mocks
+  `redis.asyncio.Redis` via `AsyncMock` to verify `RedisSessionStore` calls
+  `incr`/`expire` with the right key/TTL; since `pytest-asyncio` isn't a
+  declared dev dependency, these async tests are driven via
+  `asyncio.run(...)` inside plain sync test functions rather than pulling in
+  a new dependency out of scope for this task
+
+**Current stage**: Backend now has real per-session state via Redis, fully
+wired through Docker Compose and verified through the real
+nginx → backend → redis path; unit-tested (11 passed), `ruff check backend
+tests` clean. Still no LLM call, no GCS history loading (`infrastructure`
+layer still empty/unused), and no smoke tests / `compose.test.yaml` (still
+doesn't exist).
+
+**Next steps**: GCS history loading + real LLM call (infrastructure layer),
+wiring the actual chat use case to use the LLM/history instead of just the
+message count, `compose.test.yaml` / smoke-test infra still needs to be
+created, and Redis-down resilience/error handling was explicitly deferred.

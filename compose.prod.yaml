@@ -10,4 +10,14 @@ services:
     # No `environment:` entry for VITE_API_URL here on purpose: it's baked into
     # the static JS bundle at build time (see docker/Dockerfile-ui), so setting
     # it as a runtime container env var would silently do nothing.
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile-backend
+    # No `ports:` entry on purpose: backend is reachable only from nginx over
+    # the internal Compose network, never directly from the host/internet.
     restart: unless-stopped

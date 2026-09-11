@@ -25,6 +25,29 @@ Full request flow, the single-entry-point rationale, and history-file loading:
 **read `docs/architecture.md` before changing anything about routing, the
 nginx/backend boundary, session state, or how the professional history is loaded.**
 
+## Backend code organization (clean architecture)
+
+Backend code follows a layered clean-architecture pattern. Every new class or
+module belongs to exactly one layer:
+
+- **entities** — data types, domain classes, templates, and shared utilities
+  (logger, config helpers). No business logic, no I/O.
+- **infrastructure** — classes that manage external services (LLM client, GCS, etc.).
+- **persistence** — code that manages data storage and retrieval (redis clients).
+- **application** — business logic: the use cases and orchestration that define
+  what the system does.
+- **presentation** — API endpoints and DTO (data transfer object) definitions.
+
+**Dependency direction:** dependencies point inward. `presentation`,
+`application`, and `persistence` may depend on `infrastructure` and `entities`;
+`infrastructure` may depend on `entities` only; `entities` depends on nothing else in
+the backend. Never import a presentation/infrastructure/persistence detail into 
+`entities` — depend on an abstraction instead.
+
+When adding backend code, place it in the correct layer and respect the dependency
+direction. If a change seems to need an inward layer importing an outward one, that
+is a design smell — surface it rather than working around it.
+
 ## Components
 
 Orchestrated by Docker Compose:

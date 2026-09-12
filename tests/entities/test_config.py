@@ -6,12 +6,21 @@ monkeypatch so environment mutations never leak between tests.
 
 from app.entities.config import Settings, load_settings
 
+_ALL_ENV_VARS = [
+    "REDIS_URL",
+    "SESSION_TTL_SECONDS",
+    "HISTORY_GCS_URI",
+    "HISTORY_LOCAL_PATH",
+    "GCP_PROJECT_ID",
+    "VERTEX_LOCATION",
+    "GEMINI_MODEL",
+    "MAX_HISTORY_PAIRS",
+]
+
 
 def test_load_settings_uses_defaults_when_env_vars_unset(monkeypatch) -> None:
-    monkeypatch.delenv("REDIS_URL", raising=False)
-    monkeypatch.delenv("SESSION_TTL_SECONDS", raising=False)
-    monkeypatch.delenv("HISTORY_GCS_URI", raising=False)
-    monkeypatch.delenv("HISTORY_LOCAL_PATH", raising=False)
+    for var in _ALL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
     settings = load_settings()
 
@@ -20,6 +29,10 @@ def test_load_settings_uses_defaults_when_env_vars_unset(monkeypatch) -> None:
         session_ttl_seconds=3600,
         history_gcs_uri=None,
         history_local_path=None,
+        gcp_project_id=None,
+        vertex_location="us-central1",
+        gemini_model="gemini-2.5-flash",
+        max_history_pairs=10,
     )
 
 
@@ -28,6 +41,10 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
     monkeypatch.setenv("SESSION_TTL_SECONDS", "60")
     monkeypatch.setenv("HISTORY_GCS_URI", "gs://fake-bucket/fake-path/history.md")
     monkeypatch.setenv("HISTORY_LOCAL_PATH", "/fake/local/history.md")
+    monkeypatch.setenv("GCP_PROJECT_ID", "fake-project")
+    monkeypatch.setenv("VERTEX_LOCATION", "fake-region-1")
+    monkeypatch.setenv("GEMINI_MODEL", "fake-gemini-model")
+    monkeypatch.setenv("MAX_HISTORY_PAIRS", "5")
 
     settings = load_settings()
 
@@ -36,6 +53,10 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
         session_ttl_seconds=60,
         history_gcs_uri="gs://fake-bucket/fake-path/history.md",
         history_local_path="/fake/local/history.md",
+        gcp_project_id="fake-project",
+        vertex_location="fake-region-1",
+        gemini_model="fake-gemini-model",
+        max_history_pairs=5,
     )
 
 
@@ -46,6 +67,15 @@ def test_load_settings_casts_session_ttl_seconds_to_int(monkeypatch) -> None:
 
     assert settings.session_ttl_seconds == 120
     assert isinstance(settings.session_ttl_seconds, int)
+
+
+def test_load_settings_casts_max_history_pairs_to_int(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_HISTORY_PAIRS", "7")
+
+    settings = load_settings()
+
+    assert settings.max_history_pairs == 7
+    assert isinstance(settings.max_history_pairs, int)
 
 
 def test_load_settings_treats_empty_string_history_vars_as_unset(monkeypatch) -> None:
@@ -59,3 +89,12 @@ def test_load_settings_treats_empty_string_history_vars_as_unset(monkeypatch) ->
 
     assert settings.history_gcs_uri is None
     assert settings.history_local_path is None
+
+
+def test_load_settings_treats_empty_string_gcp_project_id_as_unset(monkeypatch) -> None:
+    """Same normalization applies to GCP_PROJECT_ID, which is also optional."""
+    monkeypatch.setenv("GCP_PROJECT_ID", "")
+
+    settings = load_settings()
+
+    assert settings.gcp_project_id is None

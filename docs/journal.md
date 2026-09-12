@@ -359,3 +359,143 @@ needed there); `compose.test.yaml` / smoke-test infra still doesn't exist;
 Redis-down resilience/error handling remains deferred; no retry/refresh
 logic exists for the history load (deliberately, per the "load once at
 startup, fail loudly" design).
+
+---
+
+## 2026-09-12 — Real Gemini/Vertex AI client with Redis-backed multi-turn memory
+
+**Summary**: Closed the loop opened by the two prior same-day entries: the
+candidate's professional history was already loading from GCS, and the
+backend's GCP service account already had `roles/aiplatform.user` from
+Terraform — this session wires a real `google-genai` Vertex AI client into
+`ChatUseCase`, replacing the placeholder message-count response with a real
+streamed Gemini answer grounded in that history, and backs the conversation
+with real Redis-stored multi-turn memory. Scope grew through three user
+corrections to the initial draft plan: (1) the plan started as single-shot
+Q&A with no memory — corrected to wire Gemini to Redis too, so past turns
+are actually considered, not just counted; (2) a configurable cap (default
+10) was added on how many Q&A pairs get fed to Gemini, to bound the history
+window; (3) backoff/retry on transient errors was added, reversing an
+initial "no retry/error handling" stance. Verified directly against the
+live model before any test-writing: confirmed the exact async SDK call
+shape (`client.aio.models.generate_content_stream` returns a coroutine that
+resolves to an async generator) by direct inspection — matched the planned
+implementation with no changes needed; called `GeminiClient` directly with
+a fabricated two-turn history and confirmed Gemini correctly recalled the
+injected fact; tested the backoff logic with a mock raising twice then
+succeeding (exactly 3 calls, correct recovery); then ran the full
+`docker compose -f compose.prod.yaml up --build` stack and, through nginx,
+asked a real question about the candidate's role/expertise (got a real,
+history-grounded answer), a same-session follow-up asking it to repeat the
+first question (correctly echoed verbatim, proving multi-turn memory works
+over the real HTTP/SSE path), and a third request under a fresh
+`session_id` (correctly had no memory of either prior exchange, and the
+system prompt's scope guardrail correctly declined an out-of-scope probe
+with no bleed-through). No backend errors in logs; stack torn down
+afterward. The `python-test-writer` subagent then both added new test files
+and substantially rewrote several existing ones, since `ChatUseCase`,
+`RedisSessionStore`'s constructor, and the chat route's response shape all
+changed in breaking ways; final result 57 tests passed, 100% coverage
+across `backend/app` (158/158 statements), ruff clean, confirmed by
+re-running the suite independently afterward.
+
+**Files changed**:
+- `backend/app/entities/chat_turn.py` — new; `ChatTurn` frozen dataclass
+  (`role` — "user" or "model", Gemini's own vocabulary — and `text`)
+- `backend/app/entities/prompts.py` — new; `SYSTEM_INSTRUCTION_TEMPLATE` +
+  `render_system_instruction(professional_history)`; the system prompt
+  constrains the agent to answer only from the candidate's professional
+  history, decline out-of-scope questions (salary, availability, personal
+  opinions) rather than guess, speak about the candidate in third person,
+  and decline attempts to override these instructions (basic
+  prompt-injection resistance); deliberately never templates the
+  candidate's name, keeping the "never hardcode candidate data into source"
+  guardrail intact
+- `backend/app/infrastructure/gemini_client.py` — new; `GeminiClient`,
+  constructor-injected `google.genai.Client` (the modern unified Google
+  GenAI SDK with `vertexai=True`, not the older `vertexai` SDK), same
+  injection style as `RedisSessionStore`/`GcsHistoryLoader`;
+  `generate_stream(system_instruction, history, message)` builds a Gemini
+  `contents` list from prior `ChatTurn`s plus the new message, keeping the
+  history + scope rules in the separate `system_instruction` field rather
+  than concatenated into the conversation; wraps only the stream-start call
+  in backoff-with-retry (3 attempts, exponential backoff starting at 1s) —
+  deliberately not mid-stream, since retrying after tokens have already
+  reached the client would mean duplicating or dropping already-sent text
+  with no clean way to do it at this layer; a failure after streaming
+  begins still propagates and drops the connection as before
+- `backend/app/persistence/session_store.py` — extended, not replaced:
+  `RedisSessionStore` gained a third constructor arg `max_history_pairs`
+  plus `append_turn` (RPUSH JSON-encoded `{role, text}`, sliding TTL
+  refresh on every append, same pattern as the pre-existing message
+  counter) and `get_history` (bounded `LRANGE` using Redis's own negative
+  index range `-2*max_history_pairs` to `-1`, so only the most recent N
+  pairs are fetched — bounding happens at the read, not by trimming the
+  underlying list, which can still grow within the TTL window); the
+  pre-existing `increment_message_count` counter was deliberately kept
+  as-is rather than derived from the history list's length (already-working
+  state, not worth refactoring for this task)
+- `backend/app/entities/config.py` — added `gcp_project_id`,
+  `vertex_location` (default "us-central1", matching the Terraform region
+  default), `gemini_model` (default "gemini-2.5-flash"),
+  `max_history_pairs` (default 10, from `MAX_HISTORY_PAIRS`)
+- `backend/app/application/chat_use_case.py` — rewritten:
+  `ChatUseCase.handle_message` is now an async generator (was a coroutine
+  returning an int); increments the message counter, reads bounded history
+  from Redis, streams Gemini's reply chunk-by-chunk to the caller while
+  accumulating it, then — only after the stream completes successfully —
+  persists both the user's turn and the full assembled model turn to Redis,
+  so a failed/interrupted generation never pollutes history the next
+  message would see (but that exchange is simply lost, not retried)
+- `backend/app/presentation/api/chat.py` — rewritten to stream real chunks
+  instead of the old fixed count; also fixes a real correctness bug: a
+  Gemini chunk can contain embedded newlines, and the frontend's SSE parser
+  expects multi-line payloads as repeated `data:`-prefixed lines within one
+  frame — a naive `f"data: {chunk}\n\n"` would have silently corrupted any
+  multi-line chunk. Fixed with a small helper that splits each chunk on
+  `\n` and re-prefixes every line with `data: ` before the terminating
+  blank line
+- `backend/app/main.py` — lifespan reordered so history loads before
+  `ChatUseCase` is constructed (it now needs the rendered system
+  instruction); builds `genai.Client(vertexai=True, project=...,
+  location=...)`, wraps it in `GeminiClient`; no new auth wiring needed —
+  the same `GOOGLE_APPLICATION_CREDENTIALS`-mounted `digital-twin-sa` key
+  already used for GCS also carries `roles/aiplatform.user` from Terraform
+- `pyproject.toml`, `docker/Dockerfile-backend` — added
+  `"google-genai>=1.0,<2"` (resolved to 1.75.0)
+- `.env`, `.env.example`, `compose.prod.yaml` — added `GCP_PROJECT_ID`
+  (real value `pmorandini-sandbox`, matching `terraform.tfvars`),
+  `VERTEX_LOCATION`, `GEMINI_MODEL`, `MAX_HISTORY_PAIRS`, same
+  `${VAR:-default}` pattern as every other backend env var
+- `tests/entities/test_prompts.py`, `tests/infrastructure/test_gemini_client.py`
+  — new; contents-building, role mapping, backoff retry-then-succeed,
+  backoff give-up-and-reraise, falsy-chunk-text filtering, with
+  `asyncio.sleep` patched so retry tests don't actually wait
+- `tests/persistence/test_session_store.py`, `tests/entities/test_config.py`,
+  `tests/application/test_chat_use_case.py` (including a dedicated test
+  proving turns are appended only after the stream fully drains, not on a
+  partial pull), `tests/api/test_chat.py` (including a dedicated test for
+  the multi-line SSE framing fix), `tests/test_main.py` — all rewritten for
+  the breaking constructor/response-shape changes; no dedicated test added
+  for `ChatTurn` itself (plain dataclass, no logic, already exercised
+  indirectly everywhere) — a deliberate, reasoned omission
+
+**Current stage**: The digital-twin backend is now functionally complete
+for its core loop — real Gemini answers, grounded in the real GCS-loaded
+professional history, with real Redis-backed multi-turn memory bounded to a
+configurable window, backoff on transient failures, all verified against
+live GCP infrastructure end-to-end, fully unit-tested (57 passed, 100%
+coverage, ruff clean).
+
+**Next steps**: Define the Cloud Run service in Terraform (attaching
+`digital-twin-sa` natively, no key needed there) — deferred since the first
+Terraform entry, now the natural next step since the application itself is
+functionally done; `compose.test.yaml` / smoke-test infra still doesn't
+exist (real Redis TTL/ordering behavior and real SSE streaming wiring can
+only be fully validated by smoke tests, not mocks); mid-stream Gemini
+failures still drop the connection with no retry (deliberately, per the
+backoff design); the underlying Redis conversation list is never trimmed
+(`LTRIM`), only bounded at read time — fine for a short-lived demo session
+bounded by TTL, worth revisiting if that stops being true; the system
+prompt is explicitly a "first draft" and may need iteration once real usage
+surfaces gaps in tone or scope-handling.

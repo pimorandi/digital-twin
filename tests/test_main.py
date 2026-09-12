@@ -2,8 +2,8 @@
 
 Exercises `lifespan` directly against a throwaway `FastAPI()` instance (never
 the `app.main.app` singleton, so these tests can't leak state into
-tests/api/test_chat.py). `Redis.from_url`, `storage.Client`, and
-`GcsHistoryLoader` are all patched — no real Redis or GCS is required.
+tests/api/test_chat.py). `Redis.from_url`, `storage.Client`, `genai.Client`,
+and `GcsHistoryLoader` are all patched — no real Redis or GCP call is made.
 
 The one behavior worth a dedicated test beyond "does it set app.state" is the
 conditional construction of `storage.Client()`: it must only be built when
@@ -32,6 +32,9 @@ def test_lifespan_builds_gcs_client_and_loads_history_when_gcs_uri_set(monkeypat
     monkeypatch.setenv("SESSION_TTL_SECONDS", "3600")
     monkeypatch.setenv("HISTORY_GCS_URI", "gs://fake-bucket/fake-path/history.md")
     monkeypatch.delenv("HISTORY_LOCAL_PATH", raising=False)
+    monkeypatch.setenv("GCP_PROJECT_ID", "fake-project")
+    monkeypatch.setenv("VERTEX_LOCATION", "fake-region-1")
+    monkeypatch.setenv("GEMINI_MODEL", "fake-gemini-model")
 
     fake_redis_client = MagicMock()
     fake_redis_client.aclose = AsyncMock()
@@ -41,6 +44,7 @@ def test_lifespan_builds_gcs_client_and_loads_history_when_gcs_uri_set(monkeypat
     with (
         patch("app.main.Redis") as redis_cls,
         patch("app.main.storage") as storage_module,
+        patch("app.main.genai") as genai_module,
         patch("app.main.GcsHistoryLoader") as loader_cls,
     ):
         redis_cls.from_url.return_value = fake_redis_client
@@ -53,6 +57,9 @@ def test_lifespan_builds_gcs_client_and_loads_history_when_gcs_uri_set(monkeypat
         storage_module.Client.assert_called_once_with()
         loader_cls.assert_called_once_with(
             fake_gcs_client, "gs://fake-bucket/fake-path/history.md", None
+        )
+        genai_module.Client.assert_called_once_with(
+            vertexai=True, project="fake-project", location="fake-region-1"
         )
         fake_redis_client.aclose.assert_awaited_once()
 
@@ -72,6 +79,7 @@ def test_lifespan_skips_gcs_client_when_gcs_uri_unset(monkeypatch) -> None:
     with (
         patch("app.main.Redis") as redis_cls,
         patch("app.main.storage") as storage_module,
+        patch("app.main.genai"),
         patch("app.main.GcsHistoryLoader") as loader_cls,
     ):
         redis_cls.from_url.return_value = fake_redis_client
@@ -85,9 +93,40 @@ def test_lifespan_skips_gcs_client_when_gcs_uri_unset(monkeypatch) -> None:
     assert fastapi_app.state.professional_history == "# Fake local history"
 
 
-def test_lifespan_uses_session_ttl_from_settings_for_session_store(monkeypatch) -> None:
+def test_lifespan_builds_gemini_client_with_model_from_settings(monkeypatch) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://fake-host:6379/0")
+    monkeypatch.delenv("HISTORY_GCS_URI", raising=False)
+    monkeypatch.setenv("HISTORY_LOCAL_PATH", "/fake/local/history.md")
+    monkeypatch.setenv("GEMINI_MODEL", "fake-gemini-model")
+
+    fake_redis_client = MagicMock()
+    fake_redis_client.aclose = AsyncMock()
+    fastapi_app = FastAPI()
+
+    with (
+        patch("app.main.Redis") as redis_cls,
+        patch("app.main.storage"),
+        patch("app.main.genai") as genai_module,
+        patch("app.main.GcsHistoryLoader") as loader_cls,
+    ):
+        redis_cls.from_url.return_value = fake_redis_client
+        loader_cls.return_value.load.return_value = "# Fake local history"
+
+        _run_lifespan_once(fastapi_app)
+
+    chat_use_case: ChatUseCase = fastapi_app.state.chat_use_case
+    # The model is private on the GeminiClient, but it's the one behavior of
+    # `lifespan` wiring worth pinning: settings.gemini_model must reach the
+    # GeminiClient, not a hardcoded default, and the underlying genai.Client
+    # instance must be the one built via genai.Client(...).
+    assert chat_use_case._gemini_client._model == "fake-gemini-model"
+    assert chat_use_case._gemini_client._client is genai_module.Client.return_value
+
+
+def test_lifespan_uses_session_ttl_and_max_history_pairs_from_settings(monkeypatch) -> None:
     monkeypatch.setenv("REDIS_URL", "redis://fake-host:6379/0")
     monkeypatch.setenv("SESSION_TTL_SECONDS", "42")
+    monkeypatch.setenv("MAX_HISTORY_PAIRS", "3")
     monkeypatch.setenv("HISTORY_LOCAL_PATH", "/fake/local/history.md")
     monkeypatch.delenv("HISTORY_GCS_URI", raising=False)
 
@@ -98,6 +137,7 @@ def test_lifespan_uses_session_ttl_from_settings_for_session_store(monkeypatch) 
     with (
         patch("app.main.Redis") as redis_cls,
         patch("app.main.storage"),
+        patch("app.main.genai"),
         patch("app.main.GcsHistoryLoader") as loader_cls,
     ):
         redis_cls.from_url.return_value = fake_redis_client
@@ -106,7 +146,8 @@ def test_lifespan_uses_session_ttl_from_settings_for_session_store(monkeypatch) 
         _run_lifespan_once(fastapi_app)
 
     chat_use_case: ChatUseCase = fastapi_app.state.chat_use_case
-    # ttl_seconds is private on the session store, but it's the one behavior
-    # of `lifespan` wiring worth pinning: settings.session_ttl_seconds must
-    # reach the RedisSessionStore, not a hardcoded default.
+    # ttl_seconds/max_history_pairs are private on the session store, but it's
+    # the one behavior of `lifespan` wiring worth pinning: settings values
+    # must reach the RedisSessionStore, not hardcoded defaults.
     assert chat_use_case._session_store._ttl_seconds == 42
+    assert chat_use_case._session_store._max_history_pairs == 3

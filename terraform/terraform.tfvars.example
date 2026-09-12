@@ -1,0 +1,8 @@
+project_id = "<your-gcp-project-id>"
+region = "us-central1"
+bucket_name = "<gcs-bucket-name>"
+bucket_location = "US"
+service_account_id = "digital-twin-backend"
+service_account_display_name = "Digital Twin Backend"
+credentials_file = ""
+backend_key_output_path = "./backend-sa-key.json"

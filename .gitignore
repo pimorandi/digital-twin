@@ -11,3 +11,12 @@ wheels/
 
 # Files
 .env
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+!terraform/terraform.tfvars.example
+terraform/*.json
+terraform/crash.log

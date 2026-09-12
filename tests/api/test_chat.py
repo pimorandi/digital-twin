@@ -8,6 +8,7 @@ required.
 """
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,21 @@ from app.presentation.api.chat import get_chat_use_case
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
+
+
+def test_get_chat_use_case_reads_from_request_app_state() -> None:
+    """The real dependency (bypassed by every route test above via
+    dependency_overrides) is just a one-line accessor onto app.state, wired up
+    by lifespan. Exercised directly here with a fake Request-like object so it
+    isn't left with zero coverage."""
+    sentinel_use_case = AsyncMock(spec=ChatUseCase)
+    fake_request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(chat_use_case=sentinel_use_case))
+    )
+
+    result = get_chat_use_case(fake_request)
+
+    assert result is sentinel_use_case
 
 
 @pytest.fixture(autouse=True)

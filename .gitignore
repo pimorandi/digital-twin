@@ -12,6 +12,9 @@ wheels/
 # Files
 .env
 
+# Coverage artifacts
+.coverage
+
 # Terraform
 terraform/.terraform/
 terraform/*.tfstate

@@ -266,3 +266,96 @@ history loading and Vertex AI/Gemini call (infrastructure layer, still
 unimplemented in the Python code — only the Terraform-side access exists so
 far); `compose.test.yaml` / smoke-test infra still doesn't exist; Redis-down
 resilience/error handling remains deferred.
+
+---
+
+## 2026-09-12 — GCS-backed professional history loader
+
+**Summary**: Picked up where the prior Terraform entry's "next steps" left
+off: implemented the Python-side code to actually read the professional-
+history markdown from the GCS bucket at startup and hold it in memory, per
+`docs/architecture.md`'s design (load once at startup, GCS primary with a
+local-file fallback for dev, never make the bucket public). The GCP-side
+access (service account, IAM) already existed from the prior session's
+Terraform work — this closes the loop on the Python side. This is the first
+code in the `infrastructure` layer, per `CLAUDE.md`'s clean-architecture
+doc. Explicitly out of scope (confirmed with the user before implementing):
+`ChatUseCase` was not changed to consume the loaded history — there's still
+no LLM call anywhere in the codebase, so there's nothing yet to hand this
+content to; that's a deliberate scope boundary, not an oversight. Verified
+directly against the real bucket outside Docker (using the SA key generated
+in the prior Terraform session) — confirmed successful download of the real
+professional-history content (not echoed further, per the guardrail against
+surfacing candidate data unnecessarily) — and again end-to-end through the
+full `docker compose -f compose.prod.yaml up --build` stack (frontend +
+backend + redis, now with `terraform/` mounted in), with backend logs
+showing clean startup and no GCS errors; also sanity-checked the existing
+`/api/chat/stream` endpoint still works through nginx. Stack was torn down
+afterward. The `python-test-writer` subagent then added unit tests using
+obviously-fake bucket names/content per the guardrail against real bucket
+names/content in tests. Final result: 19 tests passed total (11 pre-existing
++ 8 new), `ruff check backend tests` clean.
+
+**Files changed**:
+- `backend/app/infrastructure/__init__.py` — new; first file in this layer
+- `backend/app/infrastructure/history_loader.py` — new; `GcsHistoryLoader`,
+  constructor-injected `storage.Client | None` (same style as the existing
+  `RedisSessionStore` — client built by the caller, not internally), plus
+  `gcs_uri: str | None` and `local_fallback_path: str | None`; `load() ->
+  str` prefers the GCS branch (parses `gcs_uri` via a module-level
+  `_parse_gcs_uri` helper using `urllib.parse.urlparse` — bucket = netloc,
+  object path = path with leading slash stripped, raises `ValueError` on a
+  non-`gs://` scheme — then calls
+  `client.bucket(...).blob(...).download_as_text()`), falls back to reading
+  `local_fallback_path` via `pathlib.Path.read_text` if `gcs_uri` isn't set,
+  and raises `ValueError` if neither is configured; `client` is only ever
+  touched on the GCS branch, so a pure local-fallback setup needs zero GCP
+  credentials, not even to construct the loader
+- `backend/app/entities/config.py` — `Settings` gained `history_gcs_uri:
+  str | None` and `history_local_path: str | None`, read from the existing
+  `HISTORY_GCS_URI` and the new, optional `HISTORY_LOCAL_PATH` env vars
+- `backend/app/main.py` — in `lifespan`, after the existing Redis/
+  `ChatUseCase` wiring: constructs `storage.Client()` only if
+  `settings.history_gcs_uri` is set (avoids GCS's own eager ADC/credential
+  resolution when running purely on local fallback), builds the
+  `GcsHistoryLoader`, calls `.load()` once eagerly, stores the result on
+  `app.state.professional_history`; deliberately no error handling — if
+  loading fails, startup fails loudly, which is intentional since the whole
+  app depends on this value, and no retry/refresh logic was added
+- `pyproject.toml`, `docker/Dockerfile-backend` — added
+  `"google-cloud-storage>=2.18,<3"` (same two places `redis` was added
+  previously)
+- `.env`, `.env.example` — added `HISTORY_LOCAL_PATH=` (empty), documenting
+  the optional local-dev fallback path without enabling it
+- `compose.prod.yaml` — mounted the whole `terraform/` directory (not just
+  the key file) read-only into the backend service at `/secrets/terraform`,
+  set `GOOGLE_APPLICATION_CREDENTIALS=/secrets/terraform/backend-sa-key.json`
+  plus passthrough `HISTORY_GCS_URI`/`HISTORY_LOCAL_PATH` env entries;
+  mounting the whole directory rather than the single key file is
+  deliberate — `docker compose up` never fails to start even on a machine
+  where the key hasn't been generated yet, and any resulting failure
+  surfaces later, clearly, inside the app's own GCS-loading code instead of
+  as an opaque Compose bind-mount error; reuses the SA key Terraform
+  generated in the prior session, specifically for local Docker Compose dev
+  (Cloud Run will attach the SA natively later and won't need a key)
+- `tests/infrastructure/test_history_loader.py` — new; 8 tests covering the
+  GCS branch (including correct bucket/blob-path splitting via mock
+  assertions), the local-fallback branch (via a real `tmp_path` file), the
+  "neither configured" `ValueError`, GCS taking priority over local fallback
+  when both are set, and invalid `gs://` scheme handling
+
+**Current stage**: Backend now loads the real professional-history markdown
+from GCS at startup (or a local file in dev), verified end-to-end against
+real infrastructure; still no LLM/Vertex AI call anywhere in the codebase,
+so the loaded content isn't consumed by anything yet — it's just held in
+`app.state.professional_history`, ready for the next step.
+
+**Next steps**: Build the actual Vertex AI/Gemini call (infrastructure
+layer) and wire `ChatUseCase` to build a prompt from
+`app.state.professional_history` + the conversation, replacing the current
+message-count placeholder response; define the Cloud Run service in
+Terraform, attaching the `digital-twin-sa` service account natively (no key
+needed there); `compose.test.yaml` / smoke-test infra still doesn't exist;
+Redis-down resilience/error handling remains deferred; no retry/refresh
+logic exists for the history load (deliberately, per the "load once at
+startup, fail loudly" design).

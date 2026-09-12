@@ -21,6 +21,14 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-3600}
+      HISTORY_GCS_URI: ${HISTORY_GCS_URI:-}
+      HISTORY_LOCAL_PATH: ${HISTORY_LOCAL_PATH:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/terraform/backend-sa-key.json
+    # Mounts the whole `terraform/` dir (not just the key file) so `up` never
+    # fails to start even if the key hasn't been generated on this machine —
+    # any resulting failure surfaces later, clearly, inside our own GCS code.
+    volumes:
+      - ./terraform:/secrets/terraform:ro
     # No `ports:` entry on purpose: backend is reachable only from nginx over
     # the internal Compose network, never directly from the host/internet.
     depends_on:

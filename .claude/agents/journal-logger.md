@@ -42,8 +42,6 @@ conversation) understand what was just done and where the project stands.
 
    **Current stage**: One or two sentences on where the project stands now
    relative to its overall aim (see CLAUDE.md / docs/architecture.md).
-
-   **Next steps**: What's logically next, or what's left open/unfinished.
    ```
 
    Use today's actual date. Keep prose tight — this is a handoff note, not

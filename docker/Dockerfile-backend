@@ -1,11 +1,14 @@
-FROM python:3.12-slim
+# Build context is the repo root (see compose.prod.yaml) so this stage can pull
+# in the shared pyproject.toml/uv.lock as well as backend/app.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "fastapi>=0.115,<1" "uvicorn[standard]>=0.32,<1" "redis>=5.0,<6" "google-cloud-storage>=2.18,<3" "google-genai>=1.0,<2"
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY backend/app ./app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

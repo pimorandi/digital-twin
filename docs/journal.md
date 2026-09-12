@@ -499,3 +499,76 @@ backoff design); the underlying Redis conversation list is never trimmed
 bounded by TTL, worth revisiting if that stops being true; the system
 prompt is explicitly a "first draft" and may need iteration once real usage
 surfaces gaps in tone or scope-handling.
+
+---
+
+## 2026-09-12 — Backend Dockerfile switched to uv, sourcing deps from pyproject.toml
+
+**Summary**: The user noticed `docker/Dockerfile-backend` had its Python
+dependencies hardcoded directly in a `pip install "fastapi>=...", ...` line,
+duplicating the exact same list already declared in root `pyproject.toml`'s
+`dependencies`. This duplication had been quietly growing all session —
+every dependency added this session (`redis`, `google-cloud-storage`,
+`google-genai`) required editing both places by hand, with nothing
+enforcing they stayed in sync; a forgotten update in one place would only
+have surfaced as a runtime `ImportError` inside the container. The user
+asked directly: the backend container's package manager should be `uv`,
+with dependencies imported from `pyproject.toml`. Rewrote the Dockerfile to
+use Astral's official combined image `ghcr.io/astral-sh/uv:python3.12-
+bookworm-slim` (replacing `python:3.12-slim` + pip), copying
+`pyproject.toml` and `uv.lock` before `backend/app` (same cache-efficient
+layer ordering as the existing frontend Dockerfile's `package*.json`
+pattern) and running `uv sync --frozen --no-dev --no-install-project`. CMD
+changed to `uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port
+8000`. Flag rationale: `--frozen` uses `uv.lock` exactly as committed and
+errors rather than silently re-resolving if it's stale — catches a
+forgotten `uv lock` the same way the old duplication could have silently
+shipped mismatched deps; `--no-dev` excludes the `dev` dependency group
+(pytest, ruff, pytest-cov, and httpx as a dev dep) from the production
+image; `--no-install-project` is needed because root `pyproject.toml` has
+no `[build-system]` table — it's a plain dependency/tool-config manifest,
+not a packaged library, so there's nothing to build/install as a project,
+only dependencies to resolve; `--no-sync` on `uv run` at container start
+avoids re-resolving/re-installing (and any network calls) every time the
+container starts, since the environment was already built at image-build
+time. Verified for real, in order: `docker compose -f compose.prod.yaml
+build backend` succeeded on the first attempt with every flag working as
+designed (no trial-and-error needed) — confirming the flag choices, made
+from documentation/reasoning rather than a live test, held up against the
+real installed uv version. Full stack brought up (`up -d`); backend logs
+showed clean "Application startup complete" with no GCS/Vertex AI
+credential regressions (nothing about env vars or the mounted `terraform/`
+credentials changed, so this reverifies those integrations still work
+through a differently-built image). Sent a real chat request through nginx
+and got a real Gemini answer about the candidate, confirming the rebuilt
+container actually serves traffic correctly, not just starts. Spot-checked
+`docker compose exec backend uv pip list | grep -iE "pytest|ruff"` and
+confirmed neither appears in the image — `httpx` does appear, but only as a
+legitimate transitive runtime dependency of `google-genai`'s async client,
+not leftover from the dev group, confirming `--no-dev` excluded the right
+things. Stack torn down afterward. No application code was touched — this
+was a build-mechanics-only fix, so no test-writer follow-up was needed
+(Docker/build config isn't something the `python-test-writer` subagent
+covers).
+
+**Files changed**:
+- `docker/Dockerfile-backend` — base image changed from `python:3.12-slim`
+  to `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`; replaced the
+  hardcoded `pip install "fastapi>=...", ...` line with `COPY pyproject.toml
+  uv.lock ./` followed by `RUN uv sync --frozen --no-dev
+  --no-install-project`; `CMD` changed from plain `uvicorn ...` to `uv run
+  --no-sync uvicorn ...`
+
+**Current stage**: Same functional state as the prior entry (Gemini/Vertex
+AI wired with Redis-backed multi-turn memory, fully tested) — this entry is
+purely an infrastructure/build-hygiene fix, closing out the
+dependency-duplication issue between `pyproject.toml` and the backend
+Dockerfile that had been accumulating risk since the very first
+backend-skeleton task.
+
+**Next steps** (carried forward, still open): Define the Cloud Run service
+in Terraform, attaching `digital-twin-sa` natively; `compose.test.yaml` /
+smoke-test infra still doesn't exist; mid-stream Gemini failures still drop
+the connection with no retry (deliberate); the underlying Redis
+conversation list is never trimmed, only bounded at read time; the system
+prompt is a first draft that may need iteration.

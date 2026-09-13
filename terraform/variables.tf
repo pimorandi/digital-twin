@@ -43,3 +43,21 @@ variable "backend_key_output_path" {
   type        = string
   default     = "./backend-sa-key.json"
 }
+
+variable "artifact_repository_id" {
+  description = "Artifact Registry repository ID holding the built frontend/backend images."
+  type        = string
+  default     = "digital-twin"
+}
+
+variable "cloud_run_service_name" {
+  description = "Name of the Cloud Run service running nginx + backend + redis."
+  type        = string
+  default     = "digital-twin"
+}
+
+variable "history_object_path" {
+  description = "Object path (within bucket_name) of the professional-history markdown."
+  type        = string
+  default     = "professional-history.md"
+}

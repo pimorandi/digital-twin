@@ -11,15 +11,19 @@ server {
     # design: nginx is the only public origin, so the browser never talks to the
     # backend directly (no CORS, backend never internet-facing).
     #
-    # The backend service doesn't exist yet in compose.prod.yaml. A literal
+    # $BACKEND_UPSTREAM is envsubst'd in at container start (this file lives under
+    # /etc/nginx/templates/, nginx's own templating convention) so the same image
+    # works both in Compose (BACKEND_UPSTREAM=backend, a service-name DNS lookup)
+    # and on Cloud Run (BACKEND_UPSTREAM=127.0.0.1 — sidecar containers share one
+    # network namespace and talk over localhost, not service-name DNS). A literal
     # `proxy_pass http://backend:8000;` would make nginx resolve that hostname
     # once at startup and crash if it can't — so instead we resolve it lazily,
-    # per request, via Docker's embedded DNS (127.0.0.11) through a variable.
-    # Until the backend exists, requests here correctly 502 rather than
-    # preventing nginx (and the whole frontend) from starting at all.
+    # per request, via Docker's embedded DNS (127.0.0.11) through a variable. When
+    # BACKEND_UPSTREAM is already a literal IP (Cloud Run), nginx skips DNS
+    # resolution entirely, so this same block is correct unchanged either way.
     location /api/ {
         resolver 127.0.0.11 valid=10s;
-        set $backend_upstream backend:8000;
+        set $backend_upstream ${BACKEND_UPSTREAM}:8000;
         # $request_uri (not a rewritten path) forwards the full original path
         # unchanged, so the backend is expected to mount its router at /api too.
         proxy_pass http://$backend_upstream$request_uri;

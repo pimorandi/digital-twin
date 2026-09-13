@@ -1,5 +1,6 @@
 services:
   frontend:
+    profiles: ["prod", "test"]
     build:
       context: .
       dockerfile: docker/Dockerfile-ui
@@ -7,14 +8,21 @@ services:
         VITE_API_URL: ${VITE_API_URL:-/api}
     ports:
       - "${FRONTEND_PORT:-3000}:80"
-    # No `environment:` entry for VITE_API_URL here on purpose: it's baked into
-    # the static JS bundle at build time (see docker/Dockerfile-ui), so setting
-    # it as a runtime container env var would silently do nothing.
+    # No `VITE_API_URL` entry here on purpose: it's baked into the static JS
+    # bundle at build time (see docker/Dockerfile-ui), so setting it as a
+    # runtime container env var would silently do nothing. BACKEND_UPSTREAM is
+    # different — nginx's config is templated (docker/nginx.conf.template) and
+    # reads it at container start, so it's a genuine runtime var: "backend" is
+    # Compose's service-name DNS; Cloud Run's sidecar deployment sets this to
+    # 127.0.0.1 instead (localhost networking), same image either way.
+    environment:
+      BACKEND_UPSTREAM: backend
     depends_on:
       - backend
     restart: unless-stopped
 
   backend:
+    profiles: ["prod", "test"]
     build:
       context: .
       dockerfile: docker/Dockerfile-backend
@@ -27,12 +35,10 @@ services:
       VERTEX_LOCATION: ${VERTEX_LOCATION:-us-central1}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       MAX_HISTORY_PAIRS: ${MAX_HISTORY_PAIRS:-10}
-      GOOGLE_APPLICATION_CREDENTIALS: /secrets/terraform/backend-sa-key.json
-    # Mounts the whole `terraform/` dir (not just the key file) so `up` never
-    # fails to start even if the key hasn't been generated on this machine —
-    # any resulting failure surfaces later, clearly, inside our own GCS code.
-    volumes:
-      - ./terraform:/secrets/terraform:ro
+    # No credentials here on purpose: this is the prod shape, matching what
+    # ships to Cloud Run, where the attached service account provides ADC
+    # automatically (no JSON key). Local testing adds the key back via
+    # compose.test.yaml — see CLAUDE.md's "Local development" section.
     # No `ports:` entry on purpose: backend is reachable only from nginx over
     # the internal Compose network, never directly from the host/internet.
     depends_on:
@@ -40,6 +46,7 @@ services:
     restart: unless-stopped
 
   redis:
+    profiles: ["prod", "test"]
     image: redis:7-alpine
     # No `ports:` entry on purpose: redis is reachable only from the backend
     # over the internal Compose network, never directly from the host/internet.

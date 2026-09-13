@@ -72,7 +72,17 @@ Frontend, backend, and shared config all live at the top level of the repo:
 
 ## Local development
 
-- `docker compose -f compose.prod.yaml up` starts and orchestrates all containers locally.
+- Every service declares `profiles: ["prod", "test"]`, so a `--profile` flag is
+  required — plain `docker compose -f compose.prod.yaml up` now starts nothing.
+- `docker compose -f compose.prod.yaml --profile prod up` starts the prod-shaped
+  stack: matches what Cloud Run will actually run (backend has no JSON
+  credentials — Cloud Run provides ADC via the attached service account
+  instead). GCS/Vertex AI calls will fail locally under this profile; that's
+  expected, not a bug.
+- `docker compose -f compose.prod.yaml -f compose.test.yaml --profile test up`
+  starts the same stack with `compose.test.yaml` overriding `backend` to mount
+  the Terraform-generated service-account key, so GCS/Vertex AI actually work
+  locally. Use this for local testing and for smoke tests once they exist.
 - Configuration is supplied via a `.env` file at the repo root. Keep a
   `.env.example` documenting every required variable (without values).
 

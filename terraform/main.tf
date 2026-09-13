@@ -4,9 +4,34 @@ provider "google" {
   credentials = var.credentials_file != "" ? file(var.credentials_file) : null
 }
 
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
 resource "google_project_service" "aiplatform" {
   project = var.project_id
   service = "aiplatform.googleapis.com"
+
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "run" {
+  project = var.project_id
+  service = "run.googleapis.com"
+
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "artifact_registry" {
+  project = var.project_id
+  service = "artifactregistry.googleapis.com"
+
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "cloudbuild" {
+  project = var.project_id
+  service = "cloudbuild.googleapis.com"
 
   disable_on_destroy = false
 }
@@ -51,3 +76,123 @@ resource "local_file" "backend_key_file" {
   filename        = var.backend_key_output_path
   file_permission = "0600"
 }
+
+# Cloud Run's own infrastructure (the Cloud Run service agent) needs explicit
+# permission to *act as* digital-twin-sa before it can attach it to a revision
+# and mint tokens for it — attaching a service account isn't enough on its
+# own. Discovered live: without this, the metadata server refuses to issue a
+# token for digital-twin-sa with a 403, and every GCS/Vertex AI call fails.
+resource "google_service_account_iam_member" "run_agent_can_act_as_backend" {
+  service_account_id = google_service_account.backend.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:service-${data.google_project.current.number}@serverless-robot-prod.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.run]
+}
+
+resource "google_artifact_registry_repository" "images" {
+  project       = var.project_id
+  location      = var.region
+  repository_id = var.artifact_repository_id
+  format        = "DOCKER"
+
+  depends_on = [google_project_service.artifact_registry]
+}
+
+# Explicit rather than assumed: newer projects don't reliably grant Cloud
+# Build's own service agent registry-write access by default.
+resource "google_project_iam_member" "cloudbuild_artifact_writer" {
+  project = var.project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+
+  depends_on = [google_project_service.cloudbuild]
+}
+
+resource "google_cloud_run_v2_service" "app" {
+  project  = var.project_id
+  name     = var.cloud_run_service_name
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  # This is a low-traffic demo service expected to be iterated on/redeployed
+  # freely — not a production service that needs protection from accidental
+  # `terraform destroy`.
+  deletion_protection = false
+
+  template {
+    service_account = google_service_account.backend.email
+
+    containers {
+      name  = "nginx"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/frontend:latest"
+
+      ports {
+        container_port = 80
+      }
+
+      env {
+        name  = "BACKEND_UPSTREAM"
+        value = "127.0.0.1"
+      }
+
+      depends_on = ["backend"]
+    }
+
+    containers {
+      name  = "backend"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/backend:latest"
+
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "VERTEX_LOCATION"
+        value = var.region
+      }
+      env {
+        name  = "HISTORY_GCS_URI"
+        value = "gs://${var.bucket_name}/${var.history_object_path}"
+      }
+      env {
+        name  = "REDIS_URL"
+        value = "redis://localhost:6379/0"
+      }
+
+      startup_probe {
+        tcp_socket {
+          port = 8000
+        }
+      }
+
+      depends_on = ["redis"]
+    }
+
+    containers {
+      name  = "redis"
+      image = "redis:7-alpine"
+
+      startup_probe {
+        tcp_socket {
+          port = 6379
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.run,
+    google_storage_bucket_iam_member.history_bucket_reader,
+    google_project_iam_member.vertex_ai_user,
+    google_service_account_iam_member.run_agent_can_act_as_backend,
+  ]
+}
+
+# Intentionally not granted while the service is still in testing: without
+# this binding (or an equivalent), Cloud Run requires an authenticated,
+# authorized caller for every request — the service is unreachable by the
+# public internet. Re-add a `google_cloud_run_v2_service_iam_member` granting
+# `roles/run.invoker` to `allUsers` here once ready to go public again (see
+# docs/architecture.md — nginx is meant to be the public entry point
+# eventually, just not yet).

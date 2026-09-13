@@ -1,0 +1,9 @@
+services:
+  backend:
+    # Mounts the whole `terraform/` dir (not just the key file) so `up` never
+    # fails to start even if the key hasn't been generated on this machine —
+    # any resulting failure surfaces later, clearly, inside our own GCS code.
+    volumes:
+      - ./terraform:/secrets/terraform:ro
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/terraform/backend-sa-key.json

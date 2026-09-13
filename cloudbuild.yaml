@@ -1,0 +1,29 @@
+substitutions:
+  _REGION: us-central1
+  _REPO: digital-twin
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-f",
+        "docker/Dockerfile-ui",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest",
+        ".",
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-f",
+        "docker/Dockerfile-backend",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:latest",
+        ".",
+      ]
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:latest"

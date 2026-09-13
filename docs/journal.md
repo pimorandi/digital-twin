@@ -572,3 +572,123 @@ smoke-test infra still doesn't exist; mid-stream Gemini failures still drop
 the connection with no retry (deliberate); the underlying Redis
 conversation list is never trimmed, only bounded at read time; the system
 prompt is a first draft that may need iteration.
+
+---
+
+## 2026-09-13 — Cloud Run deployment via Cloud Build, then locked back down
+
+**Summary**: Picked up the prior entries' open "next step" and assembled
+everything already built (the `digital-twin-sa` service account with GCS/
+Vertex AI access, the backend loading real history and calling real Gemini
+with Redis-backed memory, and the prod/test Compose split whose whole
+premise was "Cloud Run provides credentials natively, no JSON key") into an
+actual live deployment. The user, when asked to weigh in, chose Cloud Build
+(building in GCP, pushing to Artifact Registry) over building/pushing
+locally. This surfaced one real design bug and two real deployment bugs
+that only showed up once the app was actually running on Cloud Run, not
+during design: `docker/nginx.conf` hardcoded `set $backend_upstream
+backend:8000;`, a Compose-only service-name DNS lookup — Cloud Run's
+multi-container sidecars share one network namespace and talk over
+`localhost`, so nginx would never have reached the backend. Fixed by
+renaming the file to `docker/nginx.conf.template`, parameterizing the host
+as `${BACKEND_UPSTREAM}`, and using nginx's built-in template feature
+(`/etc/nginx/templates/*.template` gets envsubst'd into
+`/etc/nginx/conf.d/` at container start); `docker/Dockerfile-ui` now copies
+there instead of to a static conf file, and `compose.prod.yaml`'s frontend
+service gained `BACKEND_UPSTREAM: backend` so the same image works
+unchanged on both Compose (`backend`) and Cloud Run (`127.0.0.1`). Verified
+locally first by rendering the substituted config inside the running
+frontend container and confirming a real chat request through nginx still
+worked, before trusting it on Cloud Run. Added a new root `cloudbuild.yaml`
+(two `docker build` steps for frontend/backend, images pushed automatically
+via the top-level `images:` list — no explicit push steps needed); `redis`
+isn't built or mirrored at all, since Cloud Run can pull `redis:7-alpine`
+straight from Docker Hub. Extended `terraform/main.tf`/`variables.tf`/
+`outputs.tf` with the Cloud Run/Artifact Registry/Cloud Build APIs, an
+Artifact Registry Docker repository, an explicit IAM grant for Cloud
+Build's own service agent (rather than assuming default permissions), and
+`google_cloud_run_v2_service.app` with three sidecar containers (nginx,
+backend, redis) — the backend container gets only the env vars that must
+differ from `load_settings()`'s own defaults (`GCP_PROJECT_ID`,
+`VERTEX_LOCATION`, `HISTORY_GCS_URI`, `REDIS_URL=redis://localhost:6379/0`),
+everything else deliberately left unset — and
+`template.service_account = google_service_account.backend.email`, the
+actual payoff of the earlier "no JSON key on Cloud Run" design decision.
+Two more real bugs were found only by deploying and reading live logs, not
+guessed in advance: (1) attaching a service account to Cloud Run wasn't
+enough on its own — Cloud Run's own service agent needed
+`roles/iam.serviceAccountUser` granted *on* `digital-twin-sa` before it
+could mint tokens for it, otherwise every GCS/Vertex AI call 403'd at the
+metadata-server level; fixed with a new
+`google_service_account_iam_member.run_agent_can_act_as_backend` resource,
+diagnosed via `gcloud logging read`. (2) `google_cloud_run_v2_service`
+defaults `deletion_protection = true`; a first failed creation attempt left
+the resource tainted in state, needing `terraform untaint` +
+`terraform apply -replace=...` before it could be recreated — resolved by
+adding `deletion_protection = false` explicitly, with a comment noting this
+is a low-traffic demo service. (3) A real ordering dependency not visible
+in the Terraform graph alone: Artifact Registry must exist before Cloud
+Build can push, but Cloud Run's service definition can't apply until the
+images already exist in the registry — so a single `terraform apply`
+doesn't work from scratch; resolved by applying the registry+IAM piece
+first with `-target=...`, then `gcloud builds submit`, then the full
+apply. Verified end-to-end against the real live deployment (not local
+Compose): a real question through the live URL got a real, history-
+grounded Gemini answer, and a same-session follow-up asking what was just
+asked correctly recalled the prior turn, proving Redis-sidecar multi-turn
+memory works over `localhost` on actual Cloud Run. A
+`google_cloud_run_v2_service_iam_member.public_invoker` binding for
+`allUsers` was then added (required for Cloud Run's default-private
+services to be reachable at all) and, in a same-day follow-up, intentionally
+removed again after the user pointed out the app is still in testing — the
+resource block was replaced with a comment explaining how to re-add it once
+nginx is meant to be public per `docs/architecture.md`. Verifying the
+removal had a real surprise: IAM propagation for Cloud Run's invoker check
+took over a minute — an initial `curl` right after `terraform apply` still
+returned 200 on both the homepage and the dynamic `/api/chat/stream` POST
+(ruling out a caching explanation), and only after polling for a couple of
+minutes did both start correctly returning 403. Explicitly out of scope,
+per the plan discussed with the user beforehand: a push-triggered
+`google_cloudbuild_trigger` (no git remote exists yet — revisit once one
+does; `cloudbuild.yaml` itself wouldn't need to change), image tagging
+beyond `:latest`, resource sizing/autoscaling tuning, Memorystore instead
+of the redis sidecar (would break the per-instance architecture the app is
+built around), a custom domain, and CI on push.
+
+**Files changed**:
+- `docker/nginx.conf` → `docker/nginx.conf.template` — renamed; hardcoded
+  `backend:8000` replaced with `${BACKEND_UPSTREAM}` for nginx's built-in
+  envsubst templating
+- `docker/Dockerfile-ui` — now copies the template into
+  `/etc/nginx/templates/` instead of a static `conf.d` file
+- `compose.prod.yaml` — frontend service gained `BACKEND_UPSTREAM: backend`
+  runtime env var
+- `cloudbuild.yaml` — new; builds and pushes the frontend and backend
+  images to Artifact Registry
+- `terraform/main.tf` — added `google_project_service` for
+  `run.googleapis.com`/`artifactregistry.googleapis.com`/
+  `cloudbuild.googleapis.com`; `google_artifact_registry_repository.images`;
+  `data "google_project" "current"`; IAM grant for Cloud Build's service
+  agent; `google_cloud_run_v2_service.app` (nginx/backend/redis sidecar
+  containers, `deletion_protection = false`, backend service account
+  attached); `google_service_account_iam_member
+  .run_agent_can_act_as_backend`; a public-invoker binding added then
+  replaced with a comment explaining how to restore it
+- `terraform/variables.tf`, `terraform/outputs.tf` — supporting variables/
+  outputs for the above (repository name/location, Cloud Run service name,
+  live service URL)
+- `compose.test.yaml` — new (referenced by this session's setup; smoke-test
+  infra itself remains a separate open item)
+
+**Current stage**: The digital twin app has a real, working Cloud Run
+deployment (verified end-to-end including multi-turn memory) but is
+currently locked to authenticated-only access while testing continues, not
+publicly reachable.
+
+**Next steps**: Re-grant the `allUsers` invoker binding when ready to go
+public (the commented-out block in `terraform/main.tf` shows exactly what
+to restore); consider an image tagging strategy beyond `:latest` if
+redeploy-on-push ever matters; connect a git remote and revisit a
+push-triggered Cloud Build trigger; `compose.test.yaml` / smoke-test infra
+still doesn't exist; mid-stream Gemini failures still drop the connection
+with no retry; the system prompt is still a first draft.

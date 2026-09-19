@@ -22,6 +22,13 @@ resource "google_project_service" "run" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "secretmanager" {
+  project = var.project_id
+  service = "secretmanager.googleapis.com"
+
+  disable_on_destroy = false
+}
+
 resource "google_project_service" "artifact_registry" {
   project = var.project_id
   service = "artifactregistry.googleapis.com"
@@ -80,6 +87,45 @@ resource "google_storage_bucket_iam_member" "chat_log_writer" {
     title      = "chat-logs-prefix-only"
     expression = "resource.name.startsWith(\"projects/_/buckets/${var.bucket_name}/objects/${var.chat_log_prefix}\")"
   }
+}
+
+# Bot-protection secrets. Only the empty secret "shells" live in Terraform: the
+# values are added out-of-band (gcloud secrets versions add ...) so they never
+# end up in the Terraform state. See docs/architecture.md, "Bot protection".
+resource "google_secret_manager_secret" "turnstile_secret_key" {
+  project   = var.project_id
+  secret_id = "turnstile-secret-key"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret" "session_signing_key" {
+  project   = var.project_id
+  secret_id = "session-signing-key"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_iam_member" "turnstile_secret_key_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.turnstile_secret_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.backend.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "session_signing_key_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.session_signing_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.backend.email}"
 }
 
 resource "google_project_iam_member" "vertex_ai_user" {
@@ -146,6 +192,11 @@ resource "google_cloud_run_v2_service" "app" {
   template {
     service_account = google_service_account.backend.email
 
+    # Cost guardrail: caps how far a burst of traffic can scale (and spend).
+    scaling {
+      max_instance_count = var.max_instances
+    }
+
     containers {
       name  = "nginx"
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/frontend:latest"
@@ -183,6 +234,24 @@ resource "google_cloud_run_v2_service" "app" {
         value = "gs://${var.bucket_name}/${var.chat_log_prefix}"
       }
       env {
+        name = "TURNSTILE_SECRET_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.turnstile_secret_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "SESSION_SIGNING_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.session_signing_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
         name  = "REDIS_URL"
         value = "redis://localhost:6379/0"
       }
@@ -212,6 +281,8 @@ resource "google_cloud_run_v2_service" "app" {
     google_project_service.run,
     google_storage_bucket_iam_member.history_bucket_reader,
     google_storage_bucket_iam_member.chat_log_writer,
+    google_secret_manager_secret_iam_member.turnstile_secret_key_accessor,
+    google_secret_manager_secret_iam_member.session_signing_key_accessor,
     google_project_iam_member.vertex_ai_user,
     google_service_account_iam_member.run_agent_can_act_as_backend,
   ]

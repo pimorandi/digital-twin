@@ -73,3 +73,9 @@ variable "chat_log_retention_days" {
   type        = number
   default     = 90
 }
+
+variable "max_instances" {
+  description = "Maximum Cloud Run instances (cost guardrail against traffic bursts)."
+  type        = number
+  default     = 2
+}

@@ -14,9 +14,12 @@ extra `await` the real call site never performs).
 """
 
 import asyncio
+import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 from app.application.chat_use_case import ChatUseCase
+from app.entities.chat_log_record import ChatLogRecord
 from app.entities.chat_turn import ChatTurn
 from app.entities.prompts import render_system_instruction
 from app.infrastructure.gemini_client import GeminiClient
@@ -36,15 +39,17 @@ def _fake_stream(chunks: list[str]):
 def _make_use_case(
     stream_chunks: list[str] | None = None,
     stored_history: list[ChatTurn] | None = None,
+    chat_log_writer: MagicMock | None = None,
+    message_count: int = 1,
 ) -> tuple[ChatUseCase, AsyncMock, MagicMock]:
     session_store = AsyncMock(spec=RedisSessionStore)
-    session_store.increment_message_count.return_value = 1
+    session_store.increment_message_count.return_value = message_count
     session_store.get_history.return_value = stored_history or []
 
     gemini_client = MagicMock(spec=GeminiClient)
     gemini_client.generate_stream = MagicMock(return_value=_fake_stream(stream_chunks or []))
 
-    use_case = ChatUseCase(session_store, gemini_client, FAKE_HISTORY_DOC)
+    use_case = ChatUseCase(session_store, gemini_client, FAKE_HISTORY_DOC, chat_log_writer)
     return use_case, session_store, gemini_client
 
 
@@ -139,3 +144,69 @@ def test_handle_message_appends_empty_model_turn_when_gemini_yields_nothing() ->
 
     assert result == []
     session_store.append_turn.assert_any_await("abc123", ChatTurn(role="model", text=""))
+
+
+def test_handle_message_writes_chat_log_record_with_seq_and_joined_reply() -> None:
+    writer = MagicMock()
+    use_case, _, _ = _make_use_case(
+        stream_chunks=["Hi", " there"], chat_log_writer=writer, message_count=7
+    )
+
+    before = datetime.now(UTC)
+    _collect(use_case.handle_message("abc123", "Hello there"))
+    after = datetime.now(UTC)
+
+    writer.write.assert_called_once()
+    record = writer.write.call_args.args[0]
+    assert isinstance(record, ChatLogRecord)
+    assert record.session_id == "abc123"
+    assert record.seq == 7
+    assert record.user_text == "Hello there"
+    assert record.model_text == "Hi there"
+    assert record.timestamp.tzinfo is not None
+    assert record.timestamp.utcoffset().total_seconds() == 0
+    assert before <= record.timestamp <= after
+
+
+def test_handle_message_without_chat_log_writer_completes_normally() -> None:
+    use_case, session_store, _ = _make_use_case(stream_chunks=["Hi"], chat_log_writer=None)
+
+    result = _collect(use_case.handle_message("abc123", "Hello there"))
+
+    assert result == ["Hi"]
+    assert session_store.append_turn.await_count == 2
+
+
+def test_handle_message_chat_log_failure_does_not_break_stream_and_is_logged(caplog) -> None:
+    writer = MagicMock()
+    writer.write.side_effect = RuntimeError("gcs down")
+    use_case, session_store, _ = _make_use_case(stream_chunks=["Hi"], chat_log_writer=writer)
+
+    with caplog.at_level(logging.ERROR):
+        result = _collect(use_case.handle_message("abc123", "Hello there"))
+
+    assert result == ["Hi"]
+    assert session_store.append_turn.await_count == 2
+    assert "Failed to write chat log for session abc123" in caplog.text
+
+
+def test_handle_message_does_not_write_chat_log_before_stream_is_consumed() -> None:
+    writer = MagicMock()
+    use_case, _, _ = _make_use_case(stream_chunks=["Hi", " there"], chat_log_writer=writer)
+
+    agen = use_case.handle_message("abc123", "Hello there")
+    asyncio.run(agen.__anext__())
+
+    writer.write.assert_not_called()
+
+
+def test_handle_message_writes_chat_log_after_both_turns_appended() -> None:
+    order: list[str] = []
+    writer = MagicMock()
+    writer.write.side_effect = lambda record: order.append("write")
+    use_case, session_store, _ = _make_use_case(stream_chunks=["Hi"], chat_log_writer=writer)
+    session_store.append_turn.side_effect = lambda *a: order.append("append")
+
+    _collect(use_case.handle_message("abc123", "Hello there"))
+
+    assert order == ["append", "append", "write"]

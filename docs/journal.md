@@ -692,3 +692,62 @@ redeploy-on-push ever matters; connect a git remote and revisit a
 push-triggered Cloud Build trigger; `compose.test.yaml` / smoke-test infra
 still doesn't exist; mid-stream Gemini failures still drop the connection
 with no retry; the system prompt is still a first draft.
+
+---
+
+## 2026-09-19 — Durable chat logging to GCS, Redis list now trimmed
+
+**Summary**: Resolves the "Redis conversation list is never trimmed
+(`LTRIM`)" next-step from the 2026-09-12 Gemini/Redis entry (that entry is
+left untouched as history). The concern was real: LLM context was bounded at
+read time (`LRANGE` of the last `2 * MAX_HISTORY_PAIRS`), but the list itself
+grew forever and the TTL resets on every write, so an active or abusive
+session could grow Redis memory unbounded. The session store now does
+`RPUSH` + `LTRIM` + `EXPIRE` in a single pipeline.
+
+Trimming discards old turns, so we also added durable chat logging into the
+same private history bucket under a `chat-logs/` prefix. Design decisions:
+GCS objects are immutable, so each exchange (user + model message) is its
+own JSON object, written create-only (`if_generation_match=0`, an HTTP 412
+is treated as success so retries are idempotent). Path is
+`chat-logs/<YYYY-MM-DD>/<session_id>/<utc_ts>_<seq:05d>.json`. Each exchange
+is logged immediately rather than batched on Redis overflow, so an instance
+dying loses nothing. The upload is awaited inside the request via
+`asyncio.to_thread` because Cloud Run throttles CPU once the response ends;
+failures are logged and never break the chat. Client IP is deliberately not
+logged (user decision). `session_id` is now validated in the request schema
+(`^[A-Za-z0-9_-]{1,64}$`) since it becomes part of an object path. Retention
+is 90 days via a bucket lifecycle rule scoped to the prefix. Chat logging is
+optional: enabled only when `CHAT_LOG_GCS_URI` is set.
+
+**Files changed**:
+- `backend/app/entities/chat_log_record.py` — new; record type for one logged exchange
+- `backend/app/infrastructure/chat_log_writer.py` — new; `GcsChatLogWriter` (create-only upload, path building)
+- `backend/app/application/chat_use_case.py` — optional writer injected; `_log_exchange` after each reply
+- `backend/app/persistence/session_store.py` — pipeline with `RPUSH` + `LTRIM` + `EXPIRE`
+- `backend/app/entities/config.py` — optional `CHAT_LOG_GCS_URI`
+- `backend/app/main.py` — GCS client built if history or chat-log URI set; writer wired in
+- `backend/app/presentation/schemas/chat.py` — `session_id` pattern constraint
+- `backend/app/infrastructure/history_loader.py` — `_parse_gcs_uri` made public as `parse_gcs_uri` for reuse
+- `.env.example` — documents `CHAT_LOG_GCS_URI`
+- `docs/architecture.md` — new "Chat logs" section
+- `terraform/main.tf` — `objectCreator` IAM member with prefix condition, lifecycle rule (delete after `chat_log_retention_days` on `chat_log_prefix`), `CHAT_LOG_GCS_URI` env on backend container, added to Cloud Run `depends_on`
+- `terraform/variables.tf` — `chat_log_prefix`, `chat_log_retention_days` (90)
+- `tests/infrastructure/test_chat_log_writer.py` — new unit tests for the writer
+- `tests/smoke/test_chat_log_writer_smoke.py` — new; skipped unless `SMOKE_BUCKET` is set
+- `tests/persistence/test_session_store.py`, `tests/application/test_chat_use_case.py`, `tests/entities/test_config.py`, `tests/test_main.py`, `tests/api/test_chat.py`, `tests/infrastructure/test_history_loader.py` — updated for the above
+
+**Current stage**: Code is complete and locally verified (ruff clean, pytest
+93 passed / 1 skipped, 100% backend coverage, `terraform validate` OK), but
+nothing is applied or deployed yet and all changes are uncommitted on
+`feature/remote-saving`.
+
+**Next steps**: Run `terraform plan`/`apply` (expect the IAM member, lifecycle
+rule, and env var); rebuild and redeploy the backend image; send chats and
+verify objects appear under `gs://<bucket>/chat-logs/`; run the smoke test
+with `SMOKE_BUCKET` set. Consider logging partial replies on mid-stream
+disconnects (try/finally with a partial flag), a UI privacy notice for logged
+chats, and a BigQuery external table for querying logs. Still open from
+earlier entries: `allUsers` invoker re-grant, image tagging beyond
+`:latest`, push-triggered Cloud Build trigger, Gemini mid-stream failure
+retry, and the first-draft system prompt.

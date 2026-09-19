@@ -45,6 +45,16 @@ resource "google_storage_bucket" "history" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
   force_destroy               = false
+
+  lifecycle_rule {
+    condition {
+      age            = var.chat_log_retention_days
+      matches_prefix = [var.chat_log_prefix]
+    }
+    action {
+      type = "Delete"
+    }
+  }
 }
 
 resource "google_service_account" "backend" {
@@ -57,6 +67,19 @@ resource "google_storage_bucket_iam_member" "history_bucket_reader" {
   bucket = google_storage_bucket.history.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.backend.email}"
+}
+
+# Create-only (no read/overwrite/delete) and limited to the chat-log prefix, so
+# the backend can log conversations but can't touch the professional history.
+resource "google_storage_bucket_iam_member" "chat_log_writer" {
+  bucket = google_storage_bucket.history.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.backend.email}"
+
+  condition {
+    title      = "chat-logs-prefix-only"
+    expression = "resource.name.startsWith(\"projects/_/buckets/${var.bucket_name}/objects/${var.chat_log_prefix}\")"
+  }
 }
 
 resource "google_project_iam_member" "vertex_ai_user" {
@@ -156,6 +179,10 @@ resource "google_cloud_run_v2_service" "app" {
         value = "gs://${var.bucket_name}/${var.history_object_path}"
       }
       env {
+        name  = "CHAT_LOG_GCS_URI"
+        value = "gs://${var.bucket_name}/${var.chat_log_prefix}"
+      }
+      env {
         name  = "REDIS_URL"
         value = "redis://localhost:6379/0"
       }
@@ -184,6 +211,7 @@ resource "google_cloud_run_v2_service" "app" {
   depends_on = [
     google_project_service.run,
     google_storage_bucket_iam_member.history_bucket_reader,
+    google_storage_bucket_iam_member.chat_log_writer,
     google_project_iam_member.vertex_ai_user,
     google_service_account_iam_member.run_agent_can_act_as_backend,
   ]

@@ -54,10 +54,14 @@ at **build time** — changing it later requires rebuilding the frontend image.
    professional history, then calls the **LLM on GCP**.
 4. Two data sources back a request, and they behave differently:
    - **redis** holds the ongoing session (per-instance, TTL-expired). A normal
-     message reads/writes redis.
+     message reads/writes redis. The stored list is trimmed to the last
+     `2 * MAX_HISTORY_PAIRS` turns on every write (`LTRIM`), so it can't grow
+     without bound.
    - The **professional history** is loaded **once at startup** and held in memory
      (see below). A normal message does *not* re-read it.
-5. As the LLM generates tokens, FastAPI **streams them back over SSE** —
+5. Once the reply is complete, the exchange is written to the chat-log prefix in
+   the bucket (see *Chat logs*), before the stream ends.
+6. As the LLM generates tokens, FastAPI **streams them back over SSE** —
    LLM → FastAPI → nginx → browser — appearing incrementally in the UI rather than
    arriving as one lump at the end.
 
@@ -91,3 +95,29 @@ container), or mount a local markdown file into the backend container via
 while the file fits comfortably in the context window. If it grows large, switch to
 retrieval (chunk + embed + fetch relevant sections) rather than stuffing the whole
 document in.
+
+## Chat logs
+
+Redis is per-instance and expires, so every completed exchange (user message +
+model reply) is also written to a **`chat-logs/` prefix in the same private
+bucket**:
+
+- One immutable JSON object per exchange (GCS objects can't be appended to):
+  `chat-logs/<YYYY-MM-DD>/<session_id>/<utc_timestamp>_<seq>.json`, with
+  `session_id`, `seq`, `timestamp`, `user`, `model`. Uploads are create-only
+  (`if_generation_match=0`).
+- Enabled by `CHAT_LOG_GCS_URI=gs://<bucket>/chat-logs/`; unset means no logging
+  (local dev without a bucket).
+- The upload is awaited inside the request (via a thread, the GCS client is sync)
+  because Cloud Run throttles CPU after the response ends. A failed upload is
+  logged and never breaks the chat.
+- Because every exchange is durable, Redis can be trimmed freely to the LLM's
+  window. Client-supplied `session_id` is validated (`[A-Za-z0-9_-]{1,64}`)
+  since it becomes part of the object name.
+- The client IP is deliberately **not** logged.
+- IAM: besides `objectViewer`, the service account gets `roles/storage.objectCreator`
+  restricted by an IAM condition to the chat-log prefix, so it can write logs but
+  can't overwrite or delete anything, including the history file.
+- A bucket lifecycle rule deletes objects under the prefix after
+  `chat_log_retention_days` (default 90). Logs hold recruiters' free text, which is
+  personal data.

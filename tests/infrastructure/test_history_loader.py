@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from app.infrastructure.history_loader import GcsHistoryLoader, _parse_gcs_uri
+from app.infrastructure.history_loader import GcsHistoryLoader, parse_gcs_uri
 
 
 def test_load_from_gcs_returns_downloaded_text() -> None:
@@ -77,11 +77,11 @@ def test_load_raises_on_invalid_gcs_scheme() -> None:
 
 def test_parse_gcs_uri_raises_on_non_gs_scheme() -> None:
     with pytest.raises(ValueError, match="Invalid GCS URI"):
-        _parse_gcs_uri("http://example.com/fake-path/history.md")
+        parse_gcs_uri("http://example.com/fake-path/history.md")
 
 
 def test_parse_gcs_uri_splits_bucket_and_blob_path() -> None:
-    bucket_name, blob_path = _parse_gcs_uri("gs://fake-bucket/fake-path/history.md")
+    bucket_name, blob_path = parse_gcs_uri("gs://fake-bucket/fake-path/history.md")
 
     assert bucket_name == "fake-bucket"
     assert blob_path == "fake-path/history.md"

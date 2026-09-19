@@ -11,6 +11,7 @@ _ALL_ENV_VARS = [
     "SESSION_TTL_SECONDS",
     "HISTORY_GCS_URI",
     "HISTORY_LOCAL_PATH",
+    "CHAT_LOG_GCS_URI",
     "GCP_PROJECT_ID",
     "VERTEX_LOCATION",
     "GEMINI_MODEL",
@@ -29,6 +30,7 @@ def test_load_settings_uses_defaults_when_env_vars_unset(monkeypatch) -> None:
         session_ttl_seconds=3600,
         history_gcs_uri=None,
         history_local_path=None,
+        chat_log_gcs_uri=None,
         gcp_project_id=None,
         vertex_location="us-central1",
         gemini_model="gemini-2.5-flash",
@@ -41,6 +43,7 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
     monkeypatch.setenv("SESSION_TTL_SECONDS", "60")
     monkeypatch.setenv("HISTORY_GCS_URI", "gs://fake-bucket/fake-path/history.md")
     monkeypatch.setenv("HISTORY_LOCAL_PATH", "/fake/local/history.md")
+    monkeypatch.setenv("CHAT_LOG_GCS_URI", "gs://fake-bucket/fake-logs")
     monkeypatch.setenv("GCP_PROJECT_ID", "fake-project")
     monkeypatch.setenv("VERTEX_LOCATION", "fake-region-1")
     monkeypatch.setenv("GEMINI_MODEL", "fake-gemini-model")
@@ -53,6 +56,7 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
         session_ttl_seconds=60,
         history_gcs_uri="gs://fake-bucket/fake-path/history.md",
         history_local_path="/fake/local/history.md",
+        chat_log_gcs_uri="gs://fake-bucket/fake-logs",
         gcp_project_id="fake-project",
         vertex_location="fake-region-1",
         gemini_model="fake-gemini-model",
@@ -98,3 +102,11 @@ def test_load_settings_treats_empty_string_gcp_project_id_as_unset(monkeypatch) 
     settings = load_settings()
 
     assert settings.gcp_project_id is None
+
+
+def test_load_settings_treats_empty_string_chat_log_gcs_uri_as_unset(monkeypatch) -> None:
+    monkeypatch.setenv("CHAT_LOG_GCS_URI", "")
+
+    settings = load_settings()
+
+    assert settings.chat_log_gcs_uri is None

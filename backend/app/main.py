@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 
 from app.application.chat_use_case import ChatUseCase
 from app.entities.config import load_settings
+from app.infrastructure.chat_log_writer import GcsChatLogWriter
 from app.infrastructure.gemini_client import GeminiClient
 from app.infrastructure.history_loader import GcsHistoryLoader
 from app.persistence.session_store import RedisSessionStore
@@ -22,7 +23,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis_client, settings.session_ttl_seconds, settings.max_history_pairs
     )
 
-    gcs_client = storage.Client() if settings.history_gcs_uri else None
+    needs_gcs = settings.history_gcs_uri or settings.chat_log_gcs_uri
+    gcs_client = storage.Client() if needs_gcs else None
     history_loader = GcsHistoryLoader(
         gcs_client, settings.history_gcs_uri, settings.history_local_path
     )
@@ -34,7 +36,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     gemini_client = GeminiClient(genai_client, settings.gemini_model)
 
-    app.state.chat_use_case = ChatUseCase(session_store, gemini_client, professional_history)
+    chat_log_writer = (
+        GcsChatLogWriter(gcs_client, settings.chat_log_gcs_uri)
+        if settings.chat_log_gcs_uri
+        else None
+    )
+
+    app.state.chat_use_case = ChatUseCase(
+        session_store, gemini_client, professional_history, chat_log_writer
+    )
 
     yield
     await redis_client.aclose()

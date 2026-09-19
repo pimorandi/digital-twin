@@ -35,6 +35,7 @@ services:
       VERTEX_LOCATION: ${VERTEX_LOCATION:-us-central1}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       MAX_HISTORY_PAIRS: ${MAX_HISTORY_PAIRS:-10}
+      CHAT_LOG_GCS_URI: ${CHAT_LOG_GCS_URI:-}
     # No credentials here on purpose: this is the prod shape, matching what
     # ships to Cloud Run, where the attached service account provides ADC
     # automatically (no JSON key). Local testing adds the key back via

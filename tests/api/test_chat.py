@@ -181,3 +181,33 @@ def test_chat_stream_wrong_type_for_message_returns_422() -> None:
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", ["a/b", "", "a" * 65, "has space", "../etc", "a.b"])
+def test_chat_stream_invalid_session_id_returns_422(bad_id: str) -> None:
+    fake_use_case = _override_chat_use_case(["Hello"])
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"session_id": bad_id, "message": "Hello there"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any(error["loc"] == ["body", "session_id"] for error in detail)
+    fake_use_case.handle_message.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "good_id",
+    ["123e4567-e89b-12d3-a456-426614174000", "a", "a" * 64, "Abc_123-x"],
+)
+def test_chat_stream_valid_session_id_returns_200(good_id: str) -> None:
+    _override_chat_use_case(["Hello"])
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"session_id": good_id, "message": "Hello there"},
+    )
+
+    assert response.status_code == 200

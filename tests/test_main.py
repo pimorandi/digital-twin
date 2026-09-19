@@ -151,3 +151,66 @@ def test_lifespan_uses_session_ttl_and_max_history_pairs_from_settings(monkeypat
     # must reach the RedisSessionStore, not hardcoded defaults.
     assert chat_use_case._session_store._ttl_seconds == 42
     assert chat_use_case._session_store._max_history_pairs == 3
+
+
+def _run_with_env(monkeypatch, env: dict[str, str | None]):
+    for key in ("HISTORY_GCS_URI", "HISTORY_LOCAL_PATH", "CHAT_LOG_GCS_URI"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("REDIS_URL", "redis://fake-host:6379/0")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    fake_redis_client = MagicMock()
+    fake_redis_client.aclose = AsyncMock()
+    fastapi_app = FastAPI()
+    with (
+        patch("app.main.Redis") as redis_cls,
+        patch("app.main.storage") as storage_module,
+        patch("app.main.genai"),
+        patch("app.main.GcsHistoryLoader") as loader_cls,
+        patch("app.main.GcsChatLogWriter") as writer_cls,
+    ):
+        redis_cls.from_url.return_value = fake_redis_client
+        loader_cls.return_value.load.return_value = "# Fake history"
+        _run_lifespan_once(fastapi_app)
+    return fastapi_app, storage_module, writer_cls
+
+
+def test_lifespan_builds_chat_log_writer_when_chat_log_uri_set(monkeypatch) -> None:
+    fastapi_app, storage_module, writer_cls = _run_with_env(
+        monkeypatch,
+        {
+            "HISTORY_LOCAL_PATH": "/fake/local/history.md",
+            "CHAT_LOG_GCS_URI": "gs://fake-bucket/fake-logs",
+        },
+    )
+
+    # storage.Client is built even though HISTORY_GCS_URI is unset
+    storage_module.Client.assert_called_once_with()
+    writer_cls.assert_called_once_with(
+        storage_module.Client.return_value, "gs://fake-bucket/fake-logs"
+    )
+    assert fastapi_app.state.chat_use_case._chat_log_writer is writer_cls.return_value
+
+
+def test_lifespan_skips_chat_log_writer_when_chat_log_uri_unset(monkeypatch) -> None:
+    fastapi_app, storage_module, writer_cls = _run_with_env(
+        monkeypatch, {"HISTORY_LOCAL_PATH": "/fake/local/history.md"}
+    )
+
+    storage_module.Client.assert_not_called()
+    writer_cls.assert_not_called()
+    assert fastapi_app.state.chat_use_case._chat_log_writer is None
+
+
+def test_lifespan_shares_one_gcs_client_between_history_and_chat_log(monkeypatch) -> None:
+    _, storage_module, writer_cls = _run_with_env(
+        monkeypatch,
+        {
+            "HISTORY_GCS_URI": "gs://fake-bucket/history.md",
+            "CHAT_LOG_GCS_URI": "gs://fake-bucket/fake-logs",
+        },
+    )
+
+    storage_module.Client.assert_called_once_with()
+    assert writer_cls.call_args.args[0] is storage_module.Client.return_value

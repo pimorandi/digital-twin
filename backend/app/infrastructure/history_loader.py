@@ -17,14 +17,14 @@ class GcsHistoryLoader:
 
     def load(self) -> str:
         if self._gcs_uri:
-            bucket_name, blob_path = _parse_gcs_uri(self._gcs_uri)
+            bucket_name, blob_path = parse_gcs_uri(self._gcs_uri)
             return self._client.bucket(bucket_name).blob(blob_path).download_as_text()
         if self._local_fallback_path:
             return Path(self._local_fallback_path).read_text(encoding="utf-8")
         raise ValueError("Set HISTORY_GCS_URI or HISTORY_LOCAL_PATH")
 
 
-def _parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
+def parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
     parsed = urlparse(gcs_uri)
     if parsed.scheme != "gs":
         raise ValueError(f"Invalid GCS URI: {gcs_uri!r}")

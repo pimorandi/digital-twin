@@ -61,3 +61,15 @@ variable "history_object_path" {
   type        = string
   default     = "professional-history.md"
 }
+
+variable "chat_log_prefix" {
+  description = "Object prefix (within bucket_name) where chat exchanges are logged."
+  type        = string
+  default     = "chat-logs/"
+}
+
+variable "chat_log_retention_days" {
+  description = "Days after which chat-log objects are deleted by a bucket lifecycle rule."
+  type        = number
+  default     = 90
+}

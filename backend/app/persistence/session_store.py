@@ -19,8 +19,11 @@ class RedisSessionStore:
 
     async def append_turn(self, session_id: str, turn: ChatTurn) -> None:
         key = f"session:{session_id}:messages"
-        await self._client.rpush(key, json.dumps({"role": turn.role, "text": turn.text}))
-        await self._client.expire(key, self._ttl_seconds)
+        async with self._client.pipeline(transaction=True) as pipe:
+            pipe.rpush(key, json.dumps({"role": turn.role, "text": turn.text}))
+            pipe.ltrim(key, -2 * self._max_history_pairs, -1)
+            pipe.expire(key, self._ttl_seconds)
+            await pipe.execute()
 
     async def get_history(self, session_id: str) -> list[ChatTurn]:
         key = f"session:{session_id}:messages"

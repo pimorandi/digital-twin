@@ -1,3 +1,27 @@
+# Coarse per-client rate limits (bot protection, see docs/architecture.md).
+# The key is the LAST X-Forwarded-For entry: on Cloud Run that's the peer address
+# Google's front end appended, which a client can't forge (earlier entries can be
+# client-supplied). Locally there is no header, so it falls back to $remote_addr.
+# The key lives only in nginx's in-memory zones — it is never logged or stored.
+# Counters are per instance, so these are soft limits.
+map $http_x_forwarded_for $limit_key {
+    ~(?<last_hop>[^,\s]+)\s*$ $last_hop;
+    default $remote_addr;
+}
+# limit_req skips requests whose key is empty, so each zone only sees its own
+# endpoint and one shared `location /api/` block can apply both.
+map $uri $session_limit_key {
+    /api/session $limit_key;
+    default "";
+}
+map $uri $chat_limit_key {
+    /api/session "";
+    default $limit_key;
+}
+# /api/session triggers an outbound Cloudflare verification, so it is stricter.
+limit_req_zone $session_limit_key zone=session_zone:1m rate=5r/m;
+limit_req_zone $chat_limit_key zone=chat_zone:1m rate=30r/m;
+
 server {
     listen 80;
     root /usr/share/nginx/html;
@@ -28,8 +52,16 @@ server {
         # unchanged, so the backend is expected to mount its router at /api too.
         proxy_pass http://$backend_upstream$request_uri;
 
+        limit_req zone=session_zone burst=5 nodelay;
+        limit_req zone=chat_zone burst=10 nodelay;
+        limit_req_status 429;
+        client_max_body_size 16k;  # chat messages are capped at a few KB
+
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        # Pass the client-supplied chain through as-is; $proxy_add_x_forwarded_for
+        # would append the hop nginx sees (Google's proxy), not the visitor.
+        proxy_set_header X-Forwarded-For $http_x_forwarded_for;
         proxy_set_header Connection '';
         proxy_buffering off;      # required for SSE tokens to stream, not batch
         proxy_read_timeout 300s;  # LLM streams can sit idle between tokens

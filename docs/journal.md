@@ -751,3 +751,79 @@ chats, and a BigQuery external table for querying logs. Still open from
 earlier entries: `allUsers` invoker re-grant, image tagging beyond
 `:latest`, push-triggered Cloud Build trigger, Gemini mid-stream failure
 retry, and the first-draft system prompt.
+
+## 2026-09-19 — Bot protection (Turnstile + signed session tokens), logging notice, chat-log Terraform applied
+
+**Summary**: Three pieces of work. (1) The chat-logging Terraform from the
+previous entry was applied (1 add, 2 change: prefix-conditioned
+`objectCreator` IAM member, 90-day lifecycle rule, `CHAT_LOG_GCS_URI` on the
+backend). While verifying, `compose.prod.yaml` turned out not to pass
+`CHAT_LOG_GCS_URI` to the backend; the user added it. Logging is only live on
+Cloud Run once the backend image is rebuilt and redeployed (not done). The
+frontend also got a `LoggingNotice` ("Chat messages are logged and
+automatically deleted after 90 days"); its `RETENTION_DAYS` constant must
+stay in sync with Terraform `chat_log_retention_days`.
+(2) Bot protection. Decision: Cloudflare Turnstile + stateless signed session
+token + rate limits + cost guardrails; no invite link, no Cloud Armor, client
+IP deliberately not logged. Flow: the frontend solves Turnstile
+(interaction-only appearance) -> `POST /api/session` -> backend verifies via
+siteverify (`TurnstileVerifier`, fails closed, no remoteip) -> returns an
+HMAC-SHA256 token `{sid (server uuid4), exp}`. `POST /api/chat/stream` now
+requires `Authorization: Bearer`; the session id comes from the token
+(`session_id` removed from the request body). Frontend: 401 -> re-solve and
+retry once; 429 -> limit message. Cost guardrails: `MAX_MESSAGES_PER_SESSION=30`
+(`SessionMessageLimitExceeded`), `MAX_OUTPUT_TOKENS=1024`, message length
+1..2000 chars, Cloud Run `max_instance_count` (default 2). `chat.py` pulls the
+first chunk before creating the `StreamingResponse` so the per-session limit
+surfaces as a real 429. `TURNSTILE_SECRET_KEY` and `SESSION_SIGNING_KEY` are
+required config (fail closed). nginx adds a last-`X-Forwarded-For`-entry
+client key, `limit_req` zones (`/api/session` 5r/m, `/api/chat` 30r/m via the
+empty-key trick so one location block applies both), 429 status,
+`client_max_body_size 16k`. These are soft limits: counters are per instance.
+Terraform adds the Secret Manager API, secret shells `turnstile-secret-key`
+and `session-signing-key` (values added out-of-band via gcloud so they never
+enter state), `secretAccessor` IAM, and Cloud Run env via `secret_key_ref`
+(latest).
+(3) Local verification with docker compose (test profile) and real Turnstile
+keys. Lessons: Turnstile widget hostnames must include `localhost` for local
+runs (error 110200 otherwise); a stale browser tab sent the old request format
+(401, no Authorization header); compose env pass-through must be updated
+whenever a new backend env var is added. After the debugging session the
+Turnstile retry is set to `'never'` and the error code is surfaced and
+`console.error`ed. Quality gate: ruff clean, pytest 151 passed / 1 skipped
+(smoke needs a bucket), 100% backend coverage; vitest 6 passed. Vitest was run
+in a node container, and that `npm ci` replaced host `node_modules` with Linux
+binaries; re-run `npm ci` locally if tooling misbehaves.
+Git: work was split into 6 commits on `feature/bot-blocker` (stacked on
+`feature/remote-saving`). At time of writing `master` also contains them
+(tip `627c5c8`), tree clean, no git remote.
+
+**Files changed**:
+- `backend/app/entities/errors.py`, `issued_session.py`, `config.py` — new error types and issued-session type; required secrets, per-session cap, max output tokens
+- `backend/app/infrastructure/turnstile_verifier.py` — new; siteverify client, fails closed
+- `backend/app/infrastructure/gemini_client.py` — `max_output_tokens`
+- `backend/app/application/session_token_service.py`, `session_use_case.py` — new; token signing/verification, session issuance
+- `backend/app/application/chat_use_case.py` — per-session message cap
+- `backend/app/presentation/api/auth.py`, `session.py`, `errors.py`, `chat.py` — Bearer auth dependency, `/api/session`, 401/403/429 handlers, first-chunk pull
+- `backend/app/presentation/schemas/chat.py`, `session.py` — `session_id` removed, message 1..2000 chars, session DTOs
+- `backend/app/main.py`, `pyproject.toml`, `uv.lock` — wiring; `httpx` moved from dev to runtime dependency
+- `docker/nginx.conf.template` — XFF client key, rate-limit zones, 429, body cap
+- `docker/Dockerfile-ui`, `compose.prod.yaml`, `cloudbuild.yaml`, `.env.example` — `VITE_TURNSTILE_SITE_KEY` build arg (`_TURNSTILE_SITE_KEY` substitution), new env vars
+- `frontend/src/lib/session.ts` — new; Turnstile script load, token cache, dedupe
+- `frontend/src/hooks/useChatStream.ts` (+ `.test.ts`) — Bearer, 401 retry, 429 handling
+- `frontend/src/components/LoggingNotice.tsx`, `ChatWindow.tsx`, `ErrorBanner.tsx`, `MessageInput.tsx`, `vite-env.d.ts` — notice, message prop, maxLength 2000
+- `terraform/main.tf`, `variables.tf` — secrets, IAM, `secret_key_ref` env, `max_instances`; `terraform validate` OK, bot-protection part NOT applied
+- `docs/architecture.md` — new "Bot protection" section
+- `tests/` — new/updated tests for auth, session, errors, token service, Turnstile verifier, config, main, chat, Gemini client
+
+**Current stage**: Bot protection is implemented and verified locally but NOT
+deployed: the bot-protection Terraform is unapplied and the secrets have no
+values yet. The service remains locked down (no public invoker).
+
+**Next steps**:
+1. `terraform apply -target` for the two secret shells; add versions (Turnstile secret via `pbpaste | tr -d '[:space:]' | gcloud secrets versions add ...`, signing key via `openssl rand -base64 32`); then full `terraform apply`.
+2. `gcloud builds submit --config cloudbuild.yaml --substitutions=_TURNSTILE_SITE_KEY=<key>` and roll a new Cloud Run revision (images use `:latest`, so Terraform will not redeploy). Test via `gcloud run services proxy` before going public.
+3. Re-grant `allUsers` invoker only when ready; set a billing budget alert in the console.
+4. Verify nginx 429 limits on the real stack, and that the last `X-Forwarded-For` entry is the real client address on Cloud Run.
+5. Add a git remote for backup / push-triggered Cloud Build.
+6. Still open: image tagging beyond `:latest`, Gemini mid-stream failures (no retry after first chunk), first-draft system prompt, logging partial replies on mid-stream disconnects, possible BigQuery external table over chat logs.

@@ -42,7 +42,7 @@ def test_generate_stream_builds_contents_from_history_and_message() -> None:
     client.aio.models.generate_content_stream = AsyncMock(
         return_value=_fake_stream([SimpleNamespace(text="hi there")])
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
     history = [ChatTurn(role="user", text="hello"), ChatTurn(role="model", text="hi!")]
 
     _collect(gemini_client.generate_stream("fake system instruction", history, "how are you?"))
@@ -55,7 +55,7 @@ def test_generate_stream_builds_contents_from_history_and_message() -> None:
         types.Content(role="user", parts=[types.Part(text="how are you?")]),
     ]
     assert call_kwargs["config"] == types.GenerateContentConfig(
-        system_instruction="fake system instruction"
+        system_instruction="fake system instruction", max_output_tokens=256
     )
 
 
@@ -64,7 +64,7 @@ def test_generate_stream_with_empty_history_only_appends_message() -> None:
     client.aio.models.generate_content_stream = AsyncMock(
         return_value=_fake_stream([SimpleNamespace(text="reply")])
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     _collect(gemini_client.generate_stream("fake system instruction", [], "first message"))
 
@@ -79,7 +79,7 @@ def test_generate_stream_yields_chunk_text_in_order() -> None:
     client.aio.models.generate_content_stream = AsyncMock(
         return_value=_fake_stream([SimpleNamespace(text="Hello"), SimpleNamespace(text=" world")])
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     result = _collect(gemini_client.generate_stream("system", [], "hi"))
 
@@ -98,7 +98,7 @@ def test_generate_stream_skips_falsy_chunk_text() -> None:
             ]
         )
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     result = _collect(gemini_client.generate_stream("system", [], "hi"))
 
@@ -110,7 +110,7 @@ def test_generate_stream_retries_after_transient_failure_then_succeeds() -> None
     client.aio.models.generate_content_stream = AsyncMock(
         side_effect=[RuntimeError("transient failure"), _fake_stream([SimpleNamespace(text="ok")])]
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     with patch("app.infrastructure.gemini_client.asyncio.sleep", new=AsyncMock()) as fake_sleep:
         result = _collect(gemini_client.generate_stream("system", [], "hi"))
@@ -129,7 +129,7 @@ def test_generate_stream_backoff_doubles_between_retries() -> None:
             _fake_stream([SimpleNamespace(text="ok")]),
         ]
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     with patch("app.infrastructure.gemini_client.asyncio.sleep", new=AsyncMock()) as fake_sleep:
         _collect(gemini_client.generate_stream("system", [], "hi"))
@@ -146,7 +146,7 @@ def test_generate_stream_gives_up_after_exhausting_attempts() -> None:
             RuntimeError("failure 3"),
         ]
     )
-    gemini_client = GeminiClient(client, "fake-model")
+    gemini_client = GeminiClient(client, "fake-model", 256)
 
     with (
         patch("app.infrastructure.gemini_client.asyncio.sleep", new=AsyncMock()),

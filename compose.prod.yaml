@@ -6,6 +6,7 @@ services:
       dockerfile: docker/Dockerfile-ui
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     # No `VITE_API_URL` entry here on purpose: it's baked into the static JS
@@ -36,6 +37,10 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       MAX_HISTORY_PAIRS: ${MAX_HISTORY_PAIRS:-10}
       CHAT_LOG_GCS_URI: ${CHAT_LOG_GCS_URI:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      SESSION_SIGNING_KEY: ${SESSION_SIGNING_KEY:-}
+      MAX_MESSAGES_PER_SESSION: ${MAX_MESSAGES_PER_SESSION:-30}
+      MAX_OUTPUT_TOKENS: ${MAX_OUTPUT_TOKENS:-1024}
     # No credentials here on purpose: this is the prod shape, matching what
     # ships to Cloud Run, where the attached service account provides ADC
     # automatically (no JSON key). Local testing adds the key back via

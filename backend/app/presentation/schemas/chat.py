@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
+MAX_MESSAGE_CHARS = 2000  # keep in sync with frontend MessageInput's maxLength
+
 
 class ChatRequest(BaseModel):
-    # Ends up in GCS object names, so restrict it to a safe charset (UUIDs pass).
-    session_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
-    message: str
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)

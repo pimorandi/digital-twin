@@ -18,9 +18,11 @@ import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from app.application.chat_use_case import ChatUseCase
 from app.entities.chat_log_record import ChatLogRecord
 from app.entities.chat_turn import ChatTurn
+from app.entities.errors import SessionMessageLimitExceeded
 from app.entities.prompts import render_system_instruction
 from app.infrastructure.gemini_client import GeminiClient
 from app.persistence.session_store import RedisSessionStore
@@ -41,6 +43,7 @@ def _make_use_case(
     stored_history: list[ChatTurn] | None = None,
     chat_log_writer: MagicMock | None = None,
     message_count: int = 1,
+    max_messages: int = 30,
 ) -> tuple[ChatUseCase, AsyncMock, MagicMock]:
     session_store = AsyncMock(spec=RedisSessionStore)
     session_store.increment_message_count.return_value = message_count
@@ -49,7 +52,9 @@ def _make_use_case(
     gemini_client = MagicMock(spec=GeminiClient)
     gemini_client.generate_stream = MagicMock(return_value=_fake_stream(stream_chunks or []))
 
-    use_case = ChatUseCase(session_store, gemini_client, FAKE_HISTORY_DOC, chat_log_writer)
+    use_case = ChatUseCase(
+        session_store, gemini_client, FAKE_HISTORY_DOC, max_messages, chat_log_writer
+    )
     return use_case, session_store, gemini_client
 
 
@@ -210,3 +215,22 @@ def test_handle_message_writes_chat_log_after_both_turns_appended() -> None:
     _collect(use_case.handle_message("abc123", "Hello there"))
 
     assert order == ["append", "append", "write"]
+
+
+def test_message_at_limit_is_allowed() -> None:
+    use_case, store, gemini = _make_use_case(["ok"], message_count=5, max_messages=5)
+
+    assert _collect(use_case.handle_message("s1", "hi")) == ["ok"]
+    gemini.generate_stream.assert_called_once()
+    assert store.append_turn.await_count == 2
+
+
+def test_message_over_limit_raises_before_any_work() -> None:
+    use_case, store, gemini = _make_use_case(["ok"], message_count=6, max_messages=5)
+
+    with pytest.raises(SessionMessageLimitExceeded):
+        _collect(use_case.handle_message("s1", "hi"))
+
+    store.get_history.assert_not_called()
+    store.append_turn.assert_not_called()
+    gemini.generate_stream.assert_not_called()

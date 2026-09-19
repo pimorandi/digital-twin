@@ -14,9 +14,20 @@ credentials even for local/dev runs that use the local-file fallback.
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from app.application.chat_use_case import ChatUseCase
+from app.application.session_token_service import SessionTokenService
+from app.application.session_use_case import SessionUseCase
 from app.main import lifespan
 from fastapi import FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _required_env(monkeypatch) -> None:
+    monkeypatch.setenv("TURNSTILE_SECRET_KEY", "fake-turnstile-secret")
+    monkeypatch.setenv("SESSION_SIGNING_KEY", "fake-signing-key")
+    monkeypatch.delenv("MAX_MESSAGES_PER_SESSION", raising=False)
+    monkeypatch.delenv("MAX_OUTPUT_TOKENS", raising=False)
 
 
 def _run_lifespan_once(fastapi_app: FastAPI) -> None:
@@ -214,3 +225,52 @@ def test_lifespan_shares_one_gcs_client_between_history_and_chat_log(monkeypatch
 
     storage_module.Client.assert_called_once_with()
     assert writer_cls.call_args.args[0] is storage_module.Client.return_value
+
+
+def test_lifespan_wires_bot_protection_and_closes_http_client(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_MESSAGES_PER_SESSION", "12")
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "321")
+    monkeypatch.setenv("SESSION_TTL_SECONDS", "77")
+    monkeypatch.setenv("HISTORY_LOCAL_PATH", "/fake/local/history.md")
+    monkeypatch.delenv("HISTORY_GCS_URI", raising=False)
+    monkeypatch.delenv("CHAT_LOG_GCS_URI", raising=False)
+
+    fake_redis_client = MagicMock()
+    fake_redis_client.aclose = AsyncMock()
+    fake_http_client = MagicMock()
+    fake_http_client.aclose = AsyncMock()
+    fastapi_app = FastAPI()
+
+    with (
+        patch("app.main.Redis") as redis_cls,
+        patch("app.main.storage"),
+        patch("app.main.genai"),
+        patch("app.main.httpx") as httpx_module,
+        patch("app.main.GcsHistoryLoader") as loader_cls,
+    ):
+        redis_cls.from_url.return_value = fake_redis_client
+        httpx_module.AsyncClient.return_value = fake_http_client
+        loader_cls.return_value.load.return_value = "# Fake history"
+
+        _run_lifespan_once(fastapi_app)
+
+    fake_http_client.aclose.assert_awaited_once()
+    token_service = fastapi_app.state.session_token_service
+    assert isinstance(token_service, SessionTokenService)
+    assert token_service._ttl_seconds == 77
+    assert token_service._signing_key == b"fake-signing-key"
+    session_use_case = fastapi_app.state.session_use_case
+    assert isinstance(session_use_case, SessionUseCase)
+    assert session_use_case._token_service is token_service
+    assert session_use_case._verifier._http_client is fake_http_client
+    assert session_use_case._verifier._secret_key == "fake-turnstile-secret"
+    chat_use_case = fastapi_app.state.chat_use_case
+    assert chat_use_case._max_messages_per_session == 12
+    assert chat_use_case._gemini_client._max_output_tokens == 321
+
+
+def test_lifespan_fails_closed_without_required_secrets(monkeypatch) -> None:
+    monkeypatch.delenv("SESSION_SIGNING_KEY")
+
+    with pytest.raises(RuntimeError, match="SESSION_SIGNING_KEY"):
+        _run_lifespan_once(FastAPI())

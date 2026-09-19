@@ -4,6 +4,7 @@ Pure function over os.environ; no external services required. Each test uses
 monkeypatch so environment mutations never leak between tests.
 """
 
+import pytest
 from app.entities.config import Settings, load_settings
 
 _ALL_ENV_VARS = [
@@ -16,12 +17,23 @@ _ALL_ENV_VARS = [
     "VERTEX_LOCATION",
     "GEMINI_MODEL",
     "MAX_HISTORY_PAIRS",
+    "TURNSTILE_SECRET_KEY",
+    "SESSION_SIGNING_KEY",
+    "MAX_MESSAGES_PER_SESSION",
+    "MAX_OUTPUT_TOKENS",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _required_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("TURNSTILE_SECRET_KEY", "fake-turnstile-secret")
+    monkeypatch.setenv("SESSION_SIGNING_KEY", "fake-signing-key")
 
 
 def test_load_settings_uses_defaults_when_env_vars_unset(monkeypatch) -> None:
     for var in _ALL_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
+        if var not in ("TURNSTILE_SECRET_KEY", "SESSION_SIGNING_KEY"):
+            monkeypatch.delenv(var, raising=False)
 
     settings = load_settings()
 
@@ -35,6 +47,10 @@ def test_load_settings_uses_defaults_when_env_vars_unset(monkeypatch) -> None:
         vertex_location="us-central1",
         gemini_model="gemini-2.5-flash",
         max_history_pairs=10,
+        turnstile_secret_key="fake-turnstile-secret",
+        session_signing_key="fake-signing-key",
+        max_messages_per_session=30,
+        max_output_tokens=1024,
     )
 
 
@@ -48,6 +64,8 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
     monkeypatch.setenv("VERTEX_LOCATION", "fake-region-1")
     monkeypatch.setenv("GEMINI_MODEL", "fake-gemini-model")
     monkeypatch.setenv("MAX_HISTORY_PAIRS", "5")
+    monkeypatch.setenv("MAX_MESSAGES_PER_SESSION", "7")
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "99")
 
     settings = load_settings()
 
@@ -61,6 +79,10 @@ def test_load_settings_reads_all_fields_from_env(monkeypatch) -> None:
         vertex_location="fake-region-1",
         gemini_model="fake-gemini-model",
         max_history_pairs=5,
+        turnstile_secret_key="fake-turnstile-secret",
+        session_signing_key="fake-signing-key",
+        max_messages_per_session=7,
+        max_output_tokens=99,
     )
 
 
@@ -110,3 +132,19 @@ def test_load_settings_treats_empty_string_chat_log_gcs_uri_as_unset(monkeypatch
     settings = load_settings()
 
     assert settings.chat_log_gcs_uri is None
+
+
+@pytest.mark.parametrize("var", ["TURNSTILE_SECRET_KEY", "SESSION_SIGNING_KEY"])
+def test_load_settings_raises_when_required_secret_missing(monkeypatch, var) -> None:
+    monkeypatch.delenv(var)
+
+    with pytest.raises(RuntimeError, match=var):
+        load_settings()
+
+
+@pytest.mark.parametrize("var", ["TURNSTILE_SECRET_KEY", "SESSION_SIGNING_KEY"])
+def test_load_settings_raises_when_required_secret_empty(monkeypatch, var) -> None:
+    monkeypatch.setenv(var, "")
+
+    with pytest.raises(RuntimeError, match=var):
+        load_settings()

@@ -11,9 +11,10 @@ _INITIAL_BACKOFF_SECONDS = 1.0
 
 
 class GeminiClient:
-    def __init__(self, client: genai.Client, model: str) -> None:
+    def __init__(self, client: genai.Client, model: str, max_output_tokens: int) -> None:
         self._client = client
         self._model = model
+        self._max_output_tokens = max_output_tokens
 
     async def generate_stream(
         self, system_instruction: str, history: list[ChatTurn], message: str
@@ -22,7 +23,9 @@ class GeminiClient:
             types.Content(role=turn.role, parts=[types.Part(text=turn.text)]) for turn in history
         ]
         contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
-        config = types.GenerateContentConfig(system_instruction=system_instruction)
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction, max_output_tokens=self._max_output_tokens
+        )
 
         stream = await self._start_stream_with_backoff(contents, config)
         async for chunk in stream:

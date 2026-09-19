@@ -1,6 +1,9 @@
 substitutions:
   _REGION: us-central1
   _REPO: digital-twin
+  # Public Turnstile site key (baked into the frontend bundle). Set at submit time:
+  #   gcloud builds submit --substitutions=_TURNSTILE_SITE_KEY=<key>
+  _TURNSTILE_SITE_KEY: ""
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -9,6 +12,8 @@ steps:
         "build",
         "-f",
         "docker/Dockerfile-ui",
+        "--build-arg",
+        "VITE_TURNSTILE_SITE_KEY=${_TURNSTILE_SITE_KEY}",
         "-t",
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest",
         ".",

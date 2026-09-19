@@ -1,10 +1,11 @@
 import { useChatStream } from '../hooks/useChatStream'
 import ErrorBanner from './ErrorBanner'
+import LoggingNotice from './LoggingNotice'
 import MessageInput from './MessageInput'
 import MessageList from './MessageList'
 
 export default function ChatWindow() {
-  const { messages, connectionStatus, sendMessage } = useChatStream()
+  const { messages, connectionStatus, errorMessage, sendMessage } = useChatStream()
   const disabled = connectionStatus === 'sending' || connectionStatus === 'streaming'
 
   return (
@@ -14,8 +15,9 @@ export default function ChatWindow() {
           Digital Twin
         </h1>
       </header>
+      <LoggingNotice />
       <MessageList messages={messages} />
-      {connectionStatus === 'error' && <ErrorBanner />}
+      {connectionStatus === 'error' && <ErrorBanner message={errorMessage} />}
       <MessageInput disabled={disabled} onSend={sendMessage} />
     </div>
   )

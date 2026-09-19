@@ -14,6 +14,9 @@ COPY frontend/ .
 # container, not from the browser this bundle runs in).
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
+# Public Cloudflare Turnstile site key, baked in the same way (it is not a secret).
+ARG VITE_TURNSTILE_SITE_KEY
+ENV VITE_TURNSTILE_SITE_KEY=$VITE_TURNSTILE_SITE_KEY
 RUN npm run build
 
 # --- serve stage ---

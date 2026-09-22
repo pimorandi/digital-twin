@@ -199,7 +199,7 @@ resource "google_cloud_run_v2_service" "app" {
 
     containers {
       name  = "nginx"
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/frontend:latest"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/frontend:${var.image_tag}"
 
       ports {
         container_port = 80
@@ -215,7 +215,7 @@ resource "google_cloud_run_v2_service" "app" {
 
     containers {
       name  = "backend"
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/backend:latest"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/backend:${var.image_tag}"
 
       env {
         name  = "GCP_PROJECT_ID"

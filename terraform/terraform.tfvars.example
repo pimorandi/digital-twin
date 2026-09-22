@@ -6,3 +6,7 @@ service_account_id = "digital-twin-backend"
 service_account_display_name = "Digital Twin Backend"
 credentials_file = ""
 backend_key_output_path = "./backend-sa-key.json"
+
+# image_tag is intentionally NOT set here — it must be passed per deploy, e.g.:
+#   terraform apply -var image_tag=$(date +%Y%m%d-%H%M%S)
+# (Do not hardcode it in terraform.tfvars; that would silently reuse a stale tag.)

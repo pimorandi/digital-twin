@@ -4,6 +4,12 @@ substitutions:
   # Public Turnstile site key (baked into the frontend bundle). Set at submit time:
   #   gcloud builds submit --substitutions=_TURNSTILE_SITE_KEY=<key>
   _TURNSTILE_SITE_KEY: ""
+  # Version tag applied to both images (alongside :latest). Generate once per
+  # deploy and reuse the SAME value for the matching
+  # `terraform apply -var image_tag=...`:
+  #   TAG=$(date +%Y%m%d-%H%M%S)
+  #   gcloud builds submit --substitutions=_TURNSTILE_SITE_KEY=<key>,_IMAGE_TAG=$TAG
+  _IMAGE_TAG: "latest"
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -15,6 +21,8 @@ steps:
         "--build-arg",
         "VITE_TURNSTILE_SITE_KEY=${_TURNSTILE_SITE_KEY}",
         "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:${_IMAGE_TAG}",
+        "-t",
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest",
         ".",
       ]
@@ -25,10 +33,14 @@ steps:
         "-f",
         "docker/Dockerfile-backend",
         "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:${_IMAGE_TAG}",
+        "-t",
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:latest",
         ".",
       ]
 
 images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:${_IMAGE_TAG}"
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:${_IMAGE_TAG}"
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:latest"

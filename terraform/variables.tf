@@ -79,3 +79,8 @@ variable "max_instances" {
   type        = number
   default     = 2
 }
+
+variable "image_tag" {
+  description = "Image tag for the frontend/backend containers. Cloud Run pins to this exact tag so `terraform apply` reliably rolls out new revisions. Must match the _IMAGE_TAG used in the corresponding `gcloud builds submit`, e.g. $(date +%Y%m%d-%H%M%S)."
+  type        = string
+}

@@ -169,3 +169,25 @@ The public **site key** is baked into the frontend at build time
 The backend refuses to start without both secrets, so it can't run unprotected by
 accident.
 
+## Deployment
+
+First-time / infra-only changes (Artifact Registry, IAM bindings, secret
+shells) can be applied narrowly before the app exists yet:
+
+    terraform apply -target=google_artifact_registry_repository.images \
+      -target=google_project_iam_member.cloudbuild_artifact_writer
+
+Every deploy of new frontend/backend code:
+
+    TAG=$(date +%Y%m%d-%H%M%S)
+    gcloud builds submit --config cloudbuild.yaml \
+      --substitutions=_TURNSTILE_SITE_KEY=<key>,_IMAGE_TAG=$TAG
+    cd terraform && terraform apply -var image_tag=$TAG
+
+`$TAG` must be the **same value** in both commands: Cloud Build tags and
+pushes `frontend:$TAG` and `backend:$TAG` (plus `:latest` for convenience),
+and `terraform apply -var image_tag=$TAG` points the Cloud Run revision at
+those exact tags — a constant `:latest` image string never changes, so
+Terraform previously had nothing to diff on and wouldn't reliably roll out
+the new image.
+

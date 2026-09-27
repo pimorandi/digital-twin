@@ -81,6 +81,24 @@ variable "max_instances" {
 }
 
 variable "image_tag" {
-  description = "Image tag for the frontend/backend containers. Cloud Run pins to this exact tag so `terraform apply` reliably rolls out new revisions. Must match the _IMAGE_TAG used in the corresponding `gcloud builds submit`, e.g. $(date +%Y%m%d-%H%M%S)."
+  description = "Image tag for the frontend/backend containers when the Cloud Run service is first created. After that, the deploy-on-master Cloud Build trigger rolls out images (tagged with the commit SHA) and Terraform ignores image changes."
+  type        = string
+  default     = "latest"
+}
+
+variable "github_owner" {
+  description = "GitHub owner of the repository the deploy trigger watches."
+  type        = string
+  default     = "pimorandi"
+}
+
+variable "github_repo" {
+  description = "GitHub repository name the deploy trigger watches."
+  type        = string
+  default     = "digital-twin"
+}
+
+variable "turnstile_site_key" {
+  description = "Public Cloudflare Turnstile site key, baked into the frontend bundle by the deploy trigger."
   type        = string
 }

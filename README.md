@@ -55,9 +55,9 @@ testing and smoke tests.
 
 ## Deployment
 
-See the "Deployment" section in [docs/architecture.md](docs/architecture.md)
-for the full build-and-deploy sequence (`gcloud builds submit` +
-`terraform apply -var image_tag=...`).
+Every push to `master` is tested, built and deployed to Cloud Run by the
+`deploy-on-master` Cloud Build trigger. See the "Deployment" section in
+[docs/architecture.md](docs/architecture.md) for the pipeline and one-time setup.
 
 ## Testing & quality
 

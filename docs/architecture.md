@@ -177,17 +177,30 @@ shells) can be applied narrowly before the app exists yet:
     terraform apply -target=google_artifact_registry_repository.images \
       -target=google_project_iam_member.cloudbuild_artifact_writer
 
-Every deploy of new frontend/backend code:
+Every push to `master` (i.e. every merged PR) deploys automatically. The
+`deploy-on-master` Cloud Build trigger (Terraform, `terraform/main.tf`) runs
+`cloudbuild.yaml`:
 
-    TAG=$(date +%Y%m%d-%H%M%S)
-    gcloud builds submit --config cloudbuild.yaml \
-      --substitutions=_TURNSTILE_SITE_KEY=<key>,_IMAGE_TAG=$TAG
-    cd terraform && terraform apply -var image_tag=$TAG
+1. **test**: `ruff check .` and `pytest --ignore=tests/smoke`. A failure stops
+   the build, so nothing is pushed or deployed.
+2. **build + push** both images, tagged with the commit's `$SHORT_SHA` (plus
+   `:latest`).
+3. **deploy**: `gcloud run services update` points the `nginx` and `backend`
+   containers at the new tags, which creates a new revision.
 
-`$TAG` must be the **same value** in both commands: Cloud Build tags and
-pushes `frontend:$TAG` and `backend:$TAG` (plus `:latest` for convenience),
-and `terraform apply -var image_tag=$TAG` points the Cloud Run revision at
-those exact tags — a constant `:latest` image string never changes, so
-Terraform previously had nothing to diff on and wouldn't reliably roll out
-the new image.
+The build runs as the `digital-twin-deployer` service account, which can only
+push to the image repo, deploy this one Cloud Run service, act as the backend
+service account, and write logs. Terraform still owns all the infra, but the
+Cloud Run service ignores changes to the container images
+(`lifecycle.ignore_changes`), so a later `terraform apply` doesn't roll back
+what CI deployed. `var.image_tag` only matters when the service is first
+created.
 
+Redeploy by hand (same substitutions, same service account):
+
+    gcloud builds triggers run deploy-on-master --branch=master
+
+**One-time setup:** connect the GitHub repo in the console (Cloud Build →
+Repositories (1st gen) → Connect repository), which installs the Cloud Build
+GitHub App. Terraform can't do this step. Then set `turnstile_site_key` in
+`terraform.tfvars` and run `terraform apply` to create the trigger.

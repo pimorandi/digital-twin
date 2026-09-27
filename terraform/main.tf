@@ -189,6 +189,11 @@ resource "google_cloud_run_v2_service" "app" {
   # `terraform destroy`.
   deletion_protection = false
 
+  # Public: Cloud Run skips the IAM invoker check, so anyone can reach nginx
+  # (the only container with a port). Abuse is handled by the bot protection
+  # described in docs/architecture.md, not by Cloud Run IAM.
+  invoker_iam_disabled = true
+
   template {
     service_account = google_service_account.backend.email
 
@@ -277,6 +282,18 @@ resource "google_cloud_run_v2_service" "app" {
     }
   }
 
+  # Images are rolled out by the Cloud Build trigger (`gcloud run services
+  # update`), so Terraform must not revert them to var.image_tag. client /
+  # client_version are stamped by gcloud on every deploy.
+  lifecycle {
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+      template[0].containers[1].image,
+    ]
+  }
+
   depends_on = [
     google_project_service.run,
     google_storage_bucket_iam_member.history_bucket_reader,
@@ -288,10 +305,77 @@ resource "google_cloud_run_v2_service" "app" {
   ]
 }
 
-# Intentionally not granted while the service is still in testing: without
-# this binding (or an equivalent), Cloud Run requires an authenticated,
-# authorized caller for every request — the service is unreachable by the
-# public internet. Re-add a `google_cloud_run_v2_service_iam_member` granting
-# `roles/run.invoker` to `allUsers` here once ready to go public again (see
-# docs/architecture.md — nginx is meant to be the public entry point
-# eventually, just not yet).
+# --- Continuous deployment -------------------------------------------------
+# Every push to master runs cloudbuild.yaml (test -> build -> push -> deploy).
+# The build runs as a dedicated, narrowly-scoped service account instead of
+# the broad legacy Cloud Build one. The GitHub repo must first be connected
+# once in the console (Cloud Build -> Repositories -> Connect repository);
+# that GitHub App install can't be done from Terraform.
+resource "google_service_account" "deployer" {
+  project      = var.project_id
+  account_id   = "digital-twin-deployer"
+  display_name = "Digital Twin Deployer (Cloud Build)"
+}
+
+resource "google_artifact_registry_repository_iam_member" "deployer_image_writer" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.images.location
+  repository = google_artifact_registry_repository.images.name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "deployer_run_developer" {
+  project  = var.project_id
+  location = google_cloud_run_v2_service.app.location
+  name     = google_cloud_run_v2_service.app.name
+  role     = "roles/run.developer"
+  member   = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# Deploying a revision that runs as the backend SA requires actAs on it.
+resource "google_service_account_iam_member" "deployer_can_act_as_backend" {
+  service_account_id = google_service_account.backend.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_cloudbuild_trigger" "deploy_on_master" {
+  project         = var.project_id
+  name            = "deploy-on-master"
+  # Must match the region the GitHub repo was connected in.
+  location        = var.region
+  description     = "Test, build and deploy to Cloud Run on every push to master."
+  filename        = "cloudbuild.yaml"
+  service_account = google_service_account.deployer.id
+
+  github {
+    owner = var.github_owner
+    name  = var.github_repo
+    push {
+      branch = "^master$"
+    }
+  }
+
+  substitutions = {
+    _REGION             = var.region
+    _REPO               = google_artifact_registry_repository.images.repository_id
+    _SERVICE            = google_cloud_run_v2_service.app.name
+    _TURNSTILE_SITE_KEY = var.turnstile_site_key
+    _IMAGE_TAG          = "$SHORT_SHA"
+  }
+
+  depends_on = [
+    google_project_service.cloudbuild,
+    google_artifact_registry_repository_iam_member.deployer_image_writer,
+    google_cloud_run_v2_service_iam_member.deployer_run_developer,
+    google_service_account_iam_member.deployer_can_act_as_backend,
+    google_project_iam_member.deployer_log_writer,
+  ]
+}

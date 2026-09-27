@@ -1,18 +1,37 @@
+# Test -> build -> push -> deploy. Runs automatically on every push to master
+# via the `deploy-on-master` trigger (terraform/main.tf), which sets
+# _IMAGE_TAG=$SHORT_SHA and _TURNSTILE_SITE_KEY. To redeploy by hand, run the
+# trigger rather than `gcloud builds submit`, so the build gets the same
+# substitutions and runs as the deployer service account:
+#   gcloud builds triggers run deploy-on-master --branch=master
 substitutions:
   _REGION: us-central1
   _REPO: digital-twin
-  # Public Turnstile site key (baked into the frontend bundle). Set at submit time:
-  #   gcloud builds submit --substitutions=_TURNSTILE_SITE_KEY=<key>
+  _SERVICE: digital-twin
+  # Public Turnstile site key (baked into the frontend bundle).
   _TURNSTILE_SITE_KEY: ""
-  # Version tag applied to both images (alongside :latest). Generate once per
-  # deploy and reuse the SAME value for the matching
-  # `terraform apply -var image_tag=...`:
-  #   TAG=$(date +%Y%m%d-%H%M%S)
-  #   gcloud builds submit --substitutions=_TURNSTILE_SITE_KEY=<key>,_IMAGE_TAG=$TAG
+  # Version tag applied to both images (alongside :latest) and deployed to
+  # Cloud Run. The trigger sets it to the commit's $SHORT_SHA.
   _IMAGE_TAG: "latest"
 
+options:
+  dynamic_substitutions: true
+  # Required when the build runs as a user-specified service account.
+  logging: CLOUD_LOGGING_ONLY
+
 steps:
-  - name: gcr.io/cloud-builders/docker
+  # Quality gate: a lint or unit-test failure stops the build before anything
+  # is pushed or deployed. Smoke tests need the compose.test.yaml stack, so
+  # they're excluded here.
+  - id: test
+    name: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    entrypoint: bash
+    args:
+      - -c
+      - uv sync --frozen && uv run ruff check . && uv run pytest --ignore=tests/smoke
+
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
     args:
       [
         "build",
@@ -26,7 +45,8 @@ steps:
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:latest",
         ".",
       ]
-  - name: gcr.io/cloud-builders/docker
+  - id: build-backend
+    name: gcr.io/cloud-builders/docker
     args:
       [
         "build",
@@ -37,6 +57,38 @@ steps:
         "-t",
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:latest",
         ".",
+      ]
+
+  # Pushed explicitly: the `images:` block below only pushes after every step
+  # has finished, which is too late for the deploy step.
+  - id: push-frontend
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend"]
+  - id: push-backend
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend"]
+
+  # Terraform owns the service's infra but ignores the container images
+  # (lifecycle.ignore_changes), so rolling out new code is just an image swap.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "services",
+        "update",
+        "${_SERVICE}",
+        "--region",
+        "${_REGION}",
+        "--container",
+        "nginx",
+        "--image",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/frontend:${_IMAGE_TAG}",
+        "--container",
+        "backend",
+        "--image",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/backend:${_IMAGE_TAG}",
       ]
 
 images:
